@@ -56,7 +56,7 @@ from app.modules.identity.models import (
     User,
     UserRole,
 )
-from app.modules.identity.rbac import Roles
+from app.modules.identity.rbac import PLATFORM_ROLES, Roles
 from app.modules.identity.schemas import (
     RoleCreate,
     UserCreate,
@@ -87,6 +87,11 @@ class AuthContext:
     @property
     def is_platform_admin(self) -> bool:
         return Roles.PLATFORM_ADMIN in self.roles
+
+    @property
+    def is_platform_user(self) -> bool:
+        """Any cross-tenant platform role — the owner or their support staff."""
+        return not self.roles.isdisjoint(PLATFORM_ROLES)
 
     def has_permission(self, *codes: str) -> bool:
         return any(code in self.permissions for code in codes)
@@ -730,11 +735,11 @@ async def assign_roles(
         role = await get_role_by_code(session, code, hospital_id=user.hospital_id)
         if role is None:
             raise ValidationError(f"Unknown role '{code}'.", code="unknown_role")
-        if role.code == Roles.PLATFORM_ADMIN and user.hospital_id is not None:
-            # PLATFORM_ADMIN is the only cross-tenant role (CLAUDE.md §8); a
-            # tenant-scoped user holding it would be an isolation breach.
+        if role.code in PLATFORM_ROLES and user.hospital_id is not None:
+            # Platform roles are the only cross-tenant ones (CLAUDE.md §8); a
+            # tenant-scoped user holding one would be an isolation breach.
             raise ValidationError(
-                "PLATFORM_ADMIN cannot be granted to a hospital-scoped user.",
+                f"{role.code} cannot be granted to a hospital-scoped user.",
                 code="invalid_role_assignment",
             )
         resolved.append(role)

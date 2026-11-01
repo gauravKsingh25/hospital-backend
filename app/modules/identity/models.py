@@ -13,19 +13,25 @@ partly *above* tenancy:
 
 from __future__ import annotations
 
+import enum
 import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Index, func, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import DateTime, Index, String, func, text
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlmodel import Field, SQLModel
 
 from app.core.models import IdentifiedModel, SoftDeleteMixin, UUIDMixin, utc_now
 
 __all__ = [
     "AuditLog",
+    "Invite",
+    "InviteStatus",
     "Permission",
+    "PlatformEmail",
+    "PlatformEmailKind",
+    "PlatformEmailStatus",
     "RefreshToken",
     "Role",
     "RolePermission",
@@ -321,6 +327,141 @@ class AuditLog(UUIDMixin, table=True):
         default_factory=utc_now,
         nullable=False,
         index=True,
+        sa_type=DateTime(timezone=True),  # type: ignore[call-overload]
+        sa_column_kwargs={"server_default": func.now()},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Invitations and the platform's own email (platform-level: no RLS policy)
+# ---------------------------------------------------------------------------
+class InviteStatus(enum.StrEnum):
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    # Cancelled by the platform team, or replaced by a resend.
+    REVOKED = "REVOKED"
+    # Set lazily on read and by the hourly sweep. Never what makes a link
+    # stop working — `expires_at` is checked on every accept regardless.
+    EXPIRED = "EXPIRED"
+
+
+class Invite(IdentifiedModel, table=True):
+    """An emailed, single-use offer of an administrator account.
+
+    The only way a new account comes to hold HOSPITAL_ADMIN or a platform role:
+    the person sets their own password, so nobody — the platform owner
+    included — ever knows it. Like `RefreshToken`, the raw link token is never
+    stored, only its SHA-256.
+    """
+
+    __tablename__ = "invites"
+    __table_args__ = (
+        # One live invite per address: a second must replace the first (resend)
+        # rather than leave two working links in someone's inbox.
+        Index(
+            "uq_invites_pending_email",
+            text("lower(email)"),
+            unique=True,
+            postgresql_where=text("status = 'PENDING'"),
+        ),
+        Index("ix_invites_status_expires_at", "status", "expires_at"),
+    )
+
+    email: str = Field(max_length=255, index=True)
+    full_name: str = Field(max_length=200)
+    phone: str | None = Field(default=None, max_length=20)
+    # NULL for an invite to the platform team.
+    hospital_id: uuid.UUID | None = Field(
+        default=None, foreign_key="hospitals.id", ondelete="RESTRICT", nullable=True, index=True
+    )
+    role_codes: list[str] = Field(sa_type=ARRAY(String(64)))  # type: ignore[call-overload]
+
+    token_hash: str = Field(max_length=64, unique=True, index=True)
+    status: InviteStatus = Field(default=InviteStatus.PENDING, index=True)
+
+    expires_at: datetime = Field(
+        nullable=False,
+        sa_type=DateTime(timezone=True),  # type: ignore[call-overload]
+    )
+    accepted_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),  # type: ignore[call-overload]
+    )
+    revoked_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),  # type: ignore[call-overload]
+    )
+    last_sent_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),  # type: ignore[call-overload]
+    )
+    send_count: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
+
+    invited_by_id: uuid.UUID = Field(foreign_key="users.id", ondelete="RESTRICT", index=True)
+    accepted_user_id: uuid.UUID | None = Field(
+        default=None, foreign_key="users.id", ondelete="RESTRICT", nullable=True, index=True
+    )
+    revoked_by_id: uuid.UUID | None = Field(
+        default=None, foreign_key="users.id", ondelete="RESTRICT", nullable=True, index=True
+    )
+    # Set when a resend replaced this invite: the old link is dead, and this
+    # says which one is alive.
+    superseded_by_id: uuid.UUID | None = Field(
+        default=None, foreign_key="invites.id", ondelete="SET NULL", nullable=True, index=True
+    )
+
+
+class PlatformEmailKind(enum.StrEnum):
+    INVITE = "INVITE"
+    INVITE_RESEND = "INVITE_RESEND"
+
+
+class PlatformEmailStatus(enum.StrEnum):
+    # The relay accepted it. Not proof it reached an inbox.
+    SENT = "SENT"
+    FAILED = "FAILED"
+
+
+class PlatformEmail(UUIDMixin, table=True):
+    """Every email the platform itself sent, and what happened.
+
+    Answers "did the invite go out?" without anybody opening a mail client.
+    The stored body has the link token blanked, so the log is safe for support
+    staff to read: it records that a link was sent, not the link.
+    """
+
+    __tablename__ = "platform_emails"
+    __table_args__ = (Index("ix_platform_emails_status_sent_at", "status", "sent_at"),)
+
+    kind: PlatformEmailKind = Field(index=True)
+    to_email: str = Field(max_length=255, index=True)
+    from_email: str = Field(max_length=255)
+    subject: str = Field(max_length=255)
+    body_text: str
+
+    invite_id: uuid.UUID | None = Field(
+        default=None, foreign_key="invites.id", ondelete="RESTRICT", nullable=True, index=True
+    )
+    hospital_id: uuid.UUID | None = Field(
+        default=None, foreign_key="hospitals.id", ondelete="RESTRICT", nullable=True, index=True
+    )
+
+    status: PlatformEmailStatus = Field(index=True)
+    error: str | None = Field(default=None, max_length=500)
+    provider_message_id: str | None = Field(default=None, max_length=255)
+
+    sent_by_id: uuid.UUID | None = Field(
+        default=None, foreign_key="users.id", ondelete="RESTRICT", nullable=True, index=True
+    )
+    sent_at: datetime = Field(
+        default_factory=utc_now,
+        nullable=False,
+        index=True,
+        sa_type=DateTime(timezone=True),  # type: ignore[call-overload]
+    )
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        nullable=False,
         sa_type=DateTime(timezone=True),  # type: ignore[call-overload]
         sa_column_kwargs={"server_default": func.now()},
     )

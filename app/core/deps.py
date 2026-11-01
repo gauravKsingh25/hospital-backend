@@ -85,10 +85,12 @@ async def get_auth_context(
 
     # Bind the database session for the rest of the request so RLS backstops
     # any query that forgets its own filter.
-    if context.is_platform_admin:
-        # PLATFORM_ADMIN is the one role CLAUDE.md §3 permits to cross tenants;
-        # its queries legitimately span hospitals, so isolation is lifted for
-        # the request rather than fought around query by query.
+    if context.is_platform_user:
+        # The platform roles are the ones CLAUDE.md §3 permits to cross
+        # tenants; their queries legitimately span hospitals, so isolation is
+        # lifted for the request rather than fought around query by query.
+        # PLATFORM_SUPPORT holds no tenant-data permission, so the lifted
+        # isolation reaches only the console's counts, never a patient.
         await set_bypass_rls(session, enabled=True)
     elif context.hospital_id is not None:
         await set_tenant_context(session, context.hospital_id)

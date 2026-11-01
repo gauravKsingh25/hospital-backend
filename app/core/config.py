@@ -346,7 +346,7 @@ class Settings(BaseSettings):
         if self.TWO_FACTOR_REQUIRED_ROLES is not None:
             return frozenset(self.TWO_FACTOR_REQUIRED_ROLES)
         if self.ENVIRONMENT in ("staging", "production"):
-            return frozenset({"PLATFORM_ADMIN", "HOSPITAL_ADMIN", "DOCTOR"})
+            return frozenset({"PLATFORM_ADMIN", "PLATFORM_SUPPORT", "HOSPITAL_ADMIN", "DOCTOR"})
         return frozenset()
 
     @property

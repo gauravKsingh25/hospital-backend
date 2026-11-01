@@ -349,6 +349,31 @@ class TestRoleAssignment:
             await service.assign_roles(session, receptionist, [Roles.PLATFORM_ADMIN])
         assert excinfo.value.code == "invalid_role_assignment"
 
+    async def test_platform_support_cannot_be_granted_to_hospital_user(
+        self, session: AsyncSession, receptionist: User
+    ) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            await service.assign_roles(session, receptionist, [Roles.PLATFORM_SUPPORT])
+        assert excinfo.value.code == "invalid_role_assignment"
+
+    async def test_platform_support_has_only_console_permissions(
+        self, session: AsyncSession
+    ) -> None:
+        from tests.conftest import _make_user
+
+        support = await _make_user(session, role_code=Roles.PLATFORM_SUPPORT, hospital_id=None)
+        context = await service.build_auth_context(session, support)
+
+        assert context.permissions == {
+            Permissions.PLATFORM_CONSOLE,
+            Permissions.PLATFORM_HOSPITAL_READ,
+            Permissions.PLATFORM_INVITE_READ,
+            Permissions.PLATFORM_INVITE_RESEND,
+            Permissions.PLATFORM_AUDIT_READ,
+        }
+        assert context.is_platform_user is True
+        assert context.is_platform_admin is False
+
     async def test_permission_check_helper(
         self, session: AsyncSession, hospital_admin: User
     ) -> None:

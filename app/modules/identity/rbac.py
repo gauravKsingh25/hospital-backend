@@ -52,6 +52,17 @@ class Permissions:
 
     AUDIT_READ = "audit:read"
 
+    # --- platform console (cross-tenant; the platform team only) ----------
+    PLATFORM_CONSOLE = "platform:console"
+    PLATFORM_HOSPITAL_READ = "platform:hospital_read"
+    PLATFORM_HOSPITAL_MANAGE = "platform:hospital_manage"
+    PLATFORM_INVITE_READ = "platform:invite_read"
+    PLATFORM_INVITE_SEND = "platform:invite_send"
+    PLATFORM_INVITE_RESEND = "platform:invite_resend"
+    PLATFORM_INVITE_REVOKE = "platform:invite_revoke"
+    PLATFORM_TEAM_MANAGE = "platform:team_manage"
+    PLATFORM_AUDIT_READ = "platform:audit_read"
+
 
 PERMISSION_CATALOGUE: Final[tuple[PermissionDef, ...]] = (
     PermissionDef(Permissions.HOSPITAL_CREATE, TENANCY_MODULE, "Register a new hospital tenant."),
@@ -70,6 +81,19 @@ PERMISSION_CATALOGUE: Final[tuple[PermissionDef, ...]] = (
     PermissionDef(Permissions.ROLE_UPDATE, MODULE, "Edit a hospital-specific role."),
     PermissionDef(Permissions.ROLE_ASSIGN, MODULE, "Assign or remove a user's roles."),
     PermissionDef(Permissions.AUDIT_READ, MODULE, "Read the audit log."),
+    PermissionDef(Permissions.PLATFORM_CONSOLE, MODULE, "Open the platform owner console."),
+    PermissionDef(
+        Permissions.PLATFORM_HOSPITAL_READ, MODULE, "View every hospital and its usage counts."
+    ),
+    PermissionDef(
+        Permissions.PLATFORM_HOSPITAL_MANAGE, MODULE, "Onboard, edit and suspend hospitals."
+    ),
+    PermissionDef(Permissions.PLATFORM_INVITE_READ, MODULE, "View invites and platform email."),
+    PermissionDef(Permissions.PLATFORM_INVITE_SEND, MODULE, "Invite a hospital administrator."),
+    PermissionDef(Permissions.PLATFORM_INVITE_RESEND, MODULE, "Resend an existing invite."),
+    PermissionDef(Permissions.PLATFORM_INVITE_REVOKE, MODULE, "Cancel an invite."),
+    PermissionDef(Permissions.PLATFORM_TEAM_MANAGE, MODULE, "Invite or remove platform staff."),
+    PermissionDef(Permissions.PLATFORM_AUDIT_READ, MODULE, "Read the platform activity log."),
 )
 
 
@@ -91,6 +115,10 @@ class RoleDef:
 
 class Roles:
     PLATFORM_ADMIN = "PLATFORM_ADMIN"
+    # The platform owner's staff: looks after hospitals (reads the console,
+    # resends an invite that went astray) without the power to onboard,
+    # suspend, or reach any hospital's patient data.
+    PLATFORM_SUPPORT = "PLATFORM_SUPPORT"
     HOSPITAL_ADMIN = "HOSPITAL_ADMIN"
     DOCTOR = "DOCTOR"
     NURSE = "NURSE"
@@ -122,6 +150,11 @@ class Roles:
 
 SYSTEM_ROLES: Final[tuple[RoleDef, ...]] = (
     RoleDef(Roles.PLATFORM_ADMIN, "Platform Administrator", "Manages hospitals across tenants."),
+    RoleDef(
+        Roles.PLATFORM_SUPPORT,
+        "Platform Support",
+        "Looks after hospitals on the platform; read-only plus resending invites.",
+    ),
     RoleDef(Roles.HOSPITAL_ADMIN, "Hospital Administrator", "Full access within one hospital."),
     RoleDef(Roles.DOCTOR, "Doctor", "Clinical actions on own or assigned patients."),
     RoleDef(Roles.NURSE, "Nurse", "Vitals, nursing notes, queue and medication records."),
@@ -156,6 +189,13 @@ SYSTEM_ROLES: Final[tuple[RoleDef, ...]] = (
 )
 
 
+# The cross-tenant roles. Neither may be held by a hospital-scoped user.
+PLATFORM_ROLES: Final[frozenset[str]] = frozenset({Roles.PLATFORM_ADMIN, Roles.PLATFORM_SUPPORT})
+
+# Roles a brand-new account may only receive by accepting an emailed invite:
+# nobody, the platform owner included, ever chooses an administrator's password.
+PRIVILEGED_ROLES: Final[frozenset[str]] = PLATFORM_ROLES | {Roles.HOSPITAL_ADMIN}
+
 # Only the permissions that exist today. Clinical, billing and diagnostics
 # roles look sparse here on purpose — they gain permissions when the modules
 # that enforce them are built.
@@ -178,6 +218,13 @@ _STAFF_BASELINE = (Permissions.HOSPITAL_READ,)
 
 SYSTEM_ROLE_PERMISSIONS: Final[dict[str, tuple[str, ...]]] = {
     Roles.PLATFORM_ADMIN: tuple(perm.code for perm in PERMISSION_CATALOGUE),
+    Roles.PLATFORM_SUPPORT: (
+        Permissions.PLATFORM_CONSOLE,
+        Permissions.PLATFORM_HOSPITAL_READ,
+        Permissions.PLATFORM_INVITE_READ,
+        Permissions.PLATFORM_INVITE_RESEND,
+        Permissions.PLATFORM_AUDIT_READ,
+    ),
     Roles.HOSPITAL_ADMIN: _ALL_HOSPITAL_ADMIN,
     Roles.AUDITOR: (
         Permissions.HOSPITAL_READ,

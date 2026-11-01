@@ -187,14 +187,32 @@ async def list_hospitals(
     *,
     search: str | None = None,
     include_inactive: bool = False,
+    is_active: bool | None = None,
+    only_ids: Collection[uuid.UUID] | None = None,
+    exclude_ids: Collection[uuid.UUID] | None = None,
 ) -> tuple[list[Hospital], int]:
-    """Paginated tenant list. Platform-admin only."""
+    """Paginated tenant list. Platform-admin only.
+
+    `is_active`, when given, overrides `include_inactive`; `only_ids` and
+    `exclude_ids` let the platform console filter by facts other modules own
+    (which hospitals are still waiting for an administrator).
+    """
     filters: list[ColumnElement[bool]] = [col(Hospital.deleted_at).is_(None)]
-    if not include_inactive:
+    if is_active is not None:
+        filters.append(col(Hospital.is_active).is_(is_active))
+    elif not include_inactive:
         filters.append(col(Hospital.is_active).is_(True))
+    if only_ids is not None:
+        filters.append(col(Hospital.id).in_(set(only_ids)))
+    if exclude_ids:
+        filters.append(col(Hospital.id).not_in(set(exclude_ids)))
     if search:
         pattern = f"%{search.strip()}%"
-        filters.append(col(Hospital.name).ilike(pattern) | col(Hospital.code).ilike(pattern))
+        filters.append(
+            col(Hospital.name).ilike(pattern)
+            | col(Hospital.code).ilike(pattern)
+            | col(Hospital.city).ilike(pattern)
+        )
 
     async with system_context(session):
         total = (

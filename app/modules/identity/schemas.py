@@ -9,26 +9,36 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.modules.identity.models import InviteStatus, PlatformEmailKind, PlatformEmailStatus
+from app.modules.tenancy.schemas import HospitalCreate, HospitalRead
 
 __all__ = [
+    "AttentionItemRead",
     "AuditLogRead",
     "ChangePasswordRequest",
     "HospitalAdminInviteCreate",
+    "HospitalUsageRead",
+    "HospitalWithAdminCreate",
     "InviteAccept",
     "InvitePreviewRead",
     "InviteRead",
     "LoginRequest",
     "PermissionRead",
+    "PlatformAdminRow",
     "PlatformEmailRead",
+    "PlatformHospitalDetail",
+    "PlatformHospitalRow",
+    "PlatformOverviewRead",
+    "PlatformTeamRow",
     "RefreshRequest",
     "RoleAssignmentRequest",
     "RoleCreate",
     "RoleRead",
+    "TeamInviteCreate",
     "TokenPair",
     "UserCreate",
     "UserRead",
@@ -322,3 +332,98 @@ class PlatformEmailRead(BaseModel):
     provider_message_id: str | None
     sent_by_name: str | None
     sent_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Platform console
+# ---------------------------------------------------------------------------
+class PlatformHospitalRow(BaseModel):
+    id: uuid.UUID
+    code: str
+    name: str
+    city: str | None
+    is_active: bool
+    status: Literal["active", "suspended", "invite_pending"]
+    admin_name: str | None
+    staff_count: int
+    last_admin_login_at: datetime | None
+    created_at: datetime
+
+
+class PlatformAdminRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    full_name: str
+    email: str
+    phone: str | None
+    is_active: bool
+    two_factor_enabled: bool
+    last_login_at: datetime | None
+    created_at: datetime
+
+
+class HospitalUsageRead(BaseModel):
+    staff: int
+    patients: int
+    visits_last_7_days: int
+
+
+class PlatformHospitalDetail(BaseModel):
+    hospital: HospitalRead
+    status: Literal["active", "suspended", "invite_pending"]
+    admins: list[PlatformAdminRow]
+    invites: list[InviteRead]
+    usage: HospitalUsageRead
+
+
+class HospitalWithAdminCreate(BaseModel):
+    """A new hospital and the invite for its first administrator, together."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hospital: HospitalCreate
+    admin: HospitalAdminInviteCreate
+
+
+class AttentionItemRead(BaseModel):
+    kind: Literal["invite_expiring", "email_failed", "no_admin", "no_admin_login"]
+    hospital_id: uuid.UUID | None
+    hospital_name: str | None
+    invite_id: uuid.UUID | None
+    email: str | None
+    at: datetime | None
+
+
+class PlatformOverviewRead(BaseModel):
+    active_hospitals: int
+    suspended_hospitals: int
+    pending_invites: int
+    staff_accounts: int
+    emails_failed_7d: int
+    attention: list[AttentionItemRead]
+    recent_activity: list[AuditLogRead]
+
+
+class PlatformTeamRow(BaseModel):
+    id: uuid.UUID
+    full_name: str
+    email: str
+    roles: list[str]
+    is_active: bool
+    two_factor_enabled: bool
+    last_login_at: datetime | None
+    created_at: datetime
+
+
+class TeamInviteCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: Annotated[str, Field(min_length=1, max_length=200)]
+    email: EmailStr
+    role: Literal["PLATFORM_ADMIN", "PLATFORM_SUPPORT"]
+
+    @field_validator("email")
+    @classmethod
+    def _normalise_email(cls, value: str) -> str:
+        return value.strip().lower()

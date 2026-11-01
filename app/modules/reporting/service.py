@@ -73,6 +73,7 @@ __all__ = [
     "build_dashboard",
     "follow_up_compliance",
     "footfall",
+    "hospital_usage",
     "inpatient_summary",
     "local_today",
     "occupancy",
@@ -114,6 +115,35 @@ def _money(value: Any) -> Decimal:
 
 async def _rows(session: AsyncSession, sql: str, params: dict[str, Any]) -> list[RowMapping]:
     return list((await session.execute(text(sql), params)).mappings().all())
+
+
+# ---------------------------------------------------------------------------
+# Platform console: how much one hospital uses the system
+# ---------------------------------------------------------------------------
+async def hospital_usage(session: AsyncSession, hospital_id: uuid.UUID) -> dict[str, int]:
+    """Patients on record and visits opened in the last seven days.
+
+    Counts only — the platform console never sees a patient. Filtered to the
+    one hospital explicitly; the caller is a platform request.
+    """
+    rows = await _rows(
+        session,
+        """
+        SELECT
+          (SELECT count(*) FROM patients
+            WHERE hospital_id = :hid AND deleted_at IS NULL AND merged_into_id IS NULL)
+            AS patients,
+          (SELECT count(*) FROM encounters
+            WHERE hospital_id = :hid AND deleted_at IS NULL
+              AND created_at >= now() - interval '7 days')
+            AS visits_last_7_days
+        """,
+        {"hid": hospital_id},
+    )
+    return {
+        "patients": int(rows[0]["patients"]),
+        "visits_last_7_days": int(rows[0]["visits_last_7_days"]),
+    }
 
 
 # ---------------------------------------------------------------------------

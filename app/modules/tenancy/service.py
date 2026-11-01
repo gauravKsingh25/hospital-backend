@@ -40,6 +40,7 @@ __all__ = [
     "get_department",
     "get_hospital",
     "get_hospital_by_code",
+    "get_hospital_names",
     "is_hospital_active",
     "list_departments",
     "list_hospitals",
@@ -149,6 +150,21 @@ async def is_hospital_active(
             )
         ).scalar_one_or_none()
     return bool(active)
+
+
+async def get_hospital_names(
+    session: AsyncSession | SAAsyncSession, hospital_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, str]:
+    """Names for a platform list that mentions many hospitals — one query."""
+    if not hospital_ids:
+        return {}
+    async with system_context(session):
+        rows = (
+            await session.execute(
+                select(Hospital.id, Hospital.name).where(col(Hospital.id).in_(set(hospital_ids)))
+            )
+        ).all()
+    return {row[0]: row[1] for row in rows}
 
 
 async def get_hospital_by_code(

@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -64,6 +65,7 @@ __all__ = [
     "get_invite",
     "hash_token",
     "invite_url",
+    "latest_emails",
     "list_invites",
     "list_platform_emails",
     "preview_invite",
@@ -615,6 +617,27 @@ async def list_platform_emails(
         .all()
     )
     return list(rows), total
+
+
+async def latest_emails(
+    session: AsyncSession, invite_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, PlatformEmail]:
+    """The newest email for each invite — one query for a page of invites."""
+    if not invite_ids:
+        return {}
+    rows = (
+        (
+            await session.execute(
+                select(PlatformEmail)
+                .where(col(PlatformEmail.invite_id).in_(set(invite_ids)))
+                .distinct(col(PlatformEmail.invite_id))
+                .order_by(col(PlatformEmail.invite_id), col(PlatformEmail.sent_at).desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {row.invite_id: row for row in rows if row.invite_id is not None}
 
 
 async def expire_due_invites(session: AsyncSession) -> int:

@@ -13,8 +13,15 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from app.modules.identity.models import InviteStatus, PlatformEmailKind, PlatformEmailStatus
+
 __all__ = [
     "AuditLogRead",
+    "HospitalAdminInviteCreate",
+    "InviteAccept",
+    "InvitePreviewRead",
+    "InviteRead",
+    "PlatformEmailRead",
     "ChangePasswordRequest",
     "LoginRequest",
     "PermissionRead",
@@ -243,3 +250,75 @@ class AuditLogRead(BaseModel):
     succeeded: bool
     ip_address: str | None
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Invitations and platform email
+# ---------------------------------------------------------------------------
+class InviteAccept(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    password: Annotated[str, Field(min_length=1, max_length=256)]
+
+
+class InvitePreviewRead(BaseModel):
+    """What the set-password page shows. No token, no ids."""
+
+    full_name: str
+    email: str
+    hospital_name: str | None
+    role_codes: list[str]
+    status: InviteStatus
+    expires_at: datetime
+    support_contact: str
+
+
+class HospitalAdminInviteCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: Annotated[str, Field(min_length=1, max_length=200)]
+    email: EmailStr
+    phone: Annotated[str | None, Field(max_length=20)] = None
+
+    @field_validator("email")
+    @classmethod
+    def _normalise_email(cls, value: str) -> str:
+        return value.strip().lower()
+
+
+class InviteRead(BaseModel):
+    id: uuid.UUID
+    email: str
+    full_name: str
+    phone: str | None
+    hospital_id: uuid.UUID | None
+    hospital_name: str | None
+    role_codes: list[str]
+    status: InviteStatus
+    expires_at: datetime
+    accepted_at: datetime | None
+    revoked_at: datetime | None
+    last_sent_at: datetime | None
+    send_count: int
+    invited_by_name: str | None
+    # The newest email for this invite: "did it go out?" on the row itself.
+    last_email_status: PlatformEmailStatus | None
+    last_email_error: str | None
+    created_at: datetime
+
+
+class PlatformEmailRead(BaseModel):
+    id: uuid.UUID
+    kind: PlatformEmailKind
+    to_email: str
+    from_email: str
+    subject: str
+    body_text: str
+    hospital_id: uuid.UUID | None
+    hospital_name: str | None
+    invite_id: uuid.UUID | None
+    status: PlatformEmailStatus
+    error: str | None
+    provider_message_id: str | None
+    sent_by_name: str | None
+    sent_at: datetime

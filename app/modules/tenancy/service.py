@@ -40,6 +40,7 @@ __all__ = [
     "get_department",
     "get_hospital",
     "get_hospital_by_code",
+    "is_hospital_active",
     "list_departments",
     "list_hospitals",
     "local_today",
@@ -129,6 +130,25 @@ async def get_hospital(
     if hospital is None:
         raise NotFoundError("Hospital not found.", code="hospital_not_found")
     return hospital
+
+
+async def is_hospital_active(
+    session: AsyncSession | SAAsyncSession, hospital_id: uuid.UUID
+) -> bool:
+    """Whether this tenant may be used at all — signed into, invited to.
+
+    Read with isolation lifted: it is asked before (or regardless of) which
+    tenant the session is bound to. A missing or deleted hospital is inactive.
+    """
+    async with system_context(session):
+        active = (
+            await session.execute(
+                select(Hospital.is_active).where(
+                    Hospital.id == hospital_id, col(Hospital.deleted_at).is_(None)
+                )
+            )
+        ).scalar_one_or_none()
+    return bool(active)
 
 
 async def get_hospital_by_code(

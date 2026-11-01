@@ -17,14 +17,14 @@ from app.modules.identity.models import InviteStatus, PlatformEmailKind, Platfor
 
 __all__ = [
     "AuditLogRead",
+    "ChangePasswordRequest",
     "HospitalAdminInviteCreate",
     "InviteAccept",
     "InvitePreviewRead",
     "InviteRead",
-    "PlatformEmailRead",
-    "ChangePasswordRequest",
     "LoginRequest",
     "PermissionRead",
+    "PlatformEmailRead",
     "RefreshRequest",
     "RoleAssignmentRequest",
     "RoleCreate",

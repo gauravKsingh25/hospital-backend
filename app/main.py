@@ -33,8 +33,8 @@ from app.core.security_headers import SecurityHeadersMiddleware
 from app.modules.billing import router as billing_router
 from app.modules.clinical import router as clinical_router
 from app.modules.diagnostics import router as diagnostics_router
-from app.modules.identity import router as identity_router
 from app.modules.identity import platform_router
+from app.modules.identity import router as identity_router
 from app.modules.ipd import router as ipd_router
 from app.modules.notifications import router as notifications_router
 from app.modules.patients import router as patients_router

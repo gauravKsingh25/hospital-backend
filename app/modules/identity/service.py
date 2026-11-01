@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import ColumnElement, func
+from sqlalchemy import ColumnElement, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col, select
 
@@ -62,6 +62,7 @@ from app.modules.identity.schemas import (
     UserCreate,
     UserUpdate,
 )
+from app.modules.tenancy import service as tenancy_service
 
 logger = logging.getLogger(__name__)
 
@@ -928,6 +929,21 @@ async def authenticate(
         await session.commit()
         raise AuthenticationError("This account has been deactivated.", code="account_inactive")
 
+    if not await _hospital_active(session, user):
+        await record_audit(
+            session,
+            action="auth.login",
+            actor=user,
+            resource_type="user",
+            resource_id=user.id,
+            succeeded=False,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            changes={"reason": "hospital_suspended"},
+        )
+        await session.commit()
+        raise _suspended()
+
     # Transparent work-factor upgrade when the Argon2 parameters have risen.
     if needs_rehash(user.password_hash):
         user.password_hash = hash_password(password)
@@ -1098,6 +1114,8 @@ async def rotate_refresh_token(
     user = await get_user(session, stored.user_id)
     if not user.is_active:
         raise AuthenticationError("This account has been deactivated.", code="account_inactive")
+    if not await _hospital_active(session, user):
+        raise _suspended()
 
     access_token, new_refresh, expires_in = await issue_token_pair(
         session,
@@ -1174,6 +1192,34 @@ async def revoke_all_refresh_tokens(
     return len(rows)
 
 
+async def revoke_hospital_sessions(session: AsyncSession, hospital_id: uuid.UUID) -> int:
+    """End every live session at one hospital — the hospital was suspended."""
+    async with system_context(session):
+        result = await session.execute(
+            update(RefreshToken)
+            .where(
+                col(RefreshToken.hospital_id) == hospital_id,
+                col(RefreshToken.revoked_at).is_(None),
+            )
+            .values(revoked_at=utc_now(), revoked_reason="hospital_suspended")
+        )
+    return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+
+async def _hospital_active(session: AsyncSession, user: User) -> bool:
+    """A platform user belongs to no hospital and is never suspended by one."""
+    if user.hospital_id is None:
+        return True
+    return await tenancy_service.is_hospital_active(session, user.hospital_id)
+
+
+def _suspended() -> AuthenticationError:
+    return AuthenticationError(
+        f"This hospital's access is suspended. Contact {settings.PLATFORM_SUPPORT_CONTACT}.",
+        code="hospital_suspended",
+    )
+
+
 async def login(
     session: AsyncSession,
     *,
@@ -1229,6 +1275,8 @@ async def user_from_access_token(session: AsyncSession, token: str) -> User:
     user = await get_user(session, claims.subject)
     if not user.is_active:
         raise AuthenticationError("This account has been deactivated.", code="account_inactive")
+    if not await _hospital_active(session, user):
+        raise _suspended()
     return user
 
 
@@ -1295,6 +1343,8 @@ async def _challenged_user(session: AsyncSession, challenge_token: str, *, enrol
     user = await get_user(session, claims.subject)
     if not user.is_active:
         raise AuthenticationError("This account has been deactivated.", code="account_inactive")
+    if not await _hospital_active(session, user):
+        raise _suspended()
     if user.locked_until is not None and user.locked_until > datetime.now(UTC):
         raise AuthenticationError(
             "This account is temporarily locked after too many failed attempts.",

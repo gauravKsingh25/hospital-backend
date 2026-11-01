@@ -221,6 +221,9 @@ async def deactivate_hospital(
     context: CanDeactivate,
 ) -> HospitalRead:
     hospital = await service.set_hospital_active(session, hospital_id, active=False)
+    # Suspension takes effect now, not when tokens happen to expire: every live
+    # session at the hospital ends, and the auth dependency refuses the rest.
+    ended = await identity_service.revoke_hospital_sessions(session, hospital.id)
     await identity_service.record_audit(
         session,
         action="hospital.deactivate",
@@ -228,6 +231,7 @@ async def deactivate_hospital(
         hospital_id=hospital.id,
         resource_type="hospital",
         resource_id=hospital.id,
+        changes={"sessions_ended": ended},
         ip_address=await get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )

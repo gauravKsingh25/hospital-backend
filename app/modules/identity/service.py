@@ -56,7 +56,7 @@ from app.modules.identity.models import (
     User,
     UserRole,
 )
-from app.modules.identity.rbac import PLATFORM_ROLES, Roles
+from app.modules.identity.rbac import PLATFORM_ROLES, PRIVILEGED_ROLES, Roles
 from app.modules.identity.schemas import (
     RoleCreate,
     UserCreate,
@@ -295,13 +295,20 @@ async def create_user(
     actor: User | None = None,
     hospital_id: uuid.UUID | None = None,
     must_change_password: bool = True,
+    allow_privileged_roles: bool = False,
 ) -> User:
     """Create a staff account and assign its roles.
 
     `hospital_id` is passed in by the caller (the router derives it from the
     actor's tenant) rather than trusted from the request body — otherwise a
     hospital admin could create users inside someone else's hospital.
+
+    A new account may not start out holding an administrator role: those come
+    only from accepting an emailed invite, so the person chooses their own
+    password. `allow_privileged_roles` is that path's key, and the bootstrap
+    scripts' — nothing reachable over HTTP passes it.
     """
+    _refuse_privileged(payload.role_codes, allowed=allow_privileged_roles)
     validate_password_strength(payload.password)
 
     if await get_user_by_email(session, payload.email) is not None:
@@ -325,7 +332,13 @@ async def create_user(
         await session.flush()
 
     if payload.role_codes:
-        await assign_roles(session, user, payload.role_codes, actor=actor)
+        await assign_roles(
+            session,
+            user,
+            payload.role_codes,
+            actor=actor,
+            allow_privileged_roles=allow_privileged_roles,
+        )
 
     await record_audit(
         session,
@@ -339,6 +352,18 @@ async def create_user(
     async with system_context(session):
         await session.refresh(user)
     return user
+
+
+def _refuse_privileged(role_codes: list[str], *, allowed: bool) -> None:
+    if allowed:
+        return
+    privileged = sorted(set(role_codes) & PRIVILEGED_ROLES)
+    if privileged:
+        raise PermissionDeniedError(
+            "Administrator accounts are created by invitation.",
+            code="invite_required",
+            details={"roles": privileged},
+        )
 
 
 async def users_with_role(
@@ -724,11 +749,17 @@ async def assign_roles(
     role_codes: list[str],
     *,
     actor: User | None = None,
+    allow_privileged_roles: bool = False,
 ) -> list[str]:
     """Replace the user's role set with `role_codes`.
 
     Idempotent and total rather than incremental: an access review reads
     "these are their roles", so the API that sets them should say the same.
+
+    A platform role the user does not already hold can only be granted on the
+    invite path (`allow_privileged_roles`). HOSPITAL_ADMIN stays assignable:
+    promoting a member of staff the hospital already employs is a deputy, not
+    a new administrator account.
     """
     resolved: list[Role] = []
     for code in role_codes:
@@ -743,6 +774,11 @@ async def assign_roles(
                 code="invalid_role_assignment",
             )
         resolved.append(role)
+
+    if not allow_privileged_roles:
+        held, _ = await resolve_permissions(session, user)
+        granted = [role.code for role in resolved if role.code not in held]
+        _refuse_privileged([code for code in granted if code in PLATFORM_ROLES], allowed=False)
 
     async with system_context(session):
         current = (

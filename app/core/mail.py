@@ -117,16 +117,17 @@ class ConsoleMailer:
 
     async def send(self, message: MailMessage) -> MailResult:
         email = _build(message)
-        logger.info(
-            "Email (console) to %s — %s\n%s", message.to, message.subject, message.text
-        )
+        logger.info("Email (console) to %s — %s\n%s", message.to, message.subject, message.text)
         if settings.MAIL_OUTBOX_DIR:
-            outbox = Path(settings.MAIL_OUTBOX_DIR)
-            outbox.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
-            safe_to = re.sub(r"[^A-Za-z0-9@._-]", "_", message.to)
-            (outbox / f"{stamp}-{safe_to}.eml").write_bytes(email.as_bytes())
+            await asyncio.to_thread(_write_outbox, Path(settings.MAIL_OUTBOX_DIR), message, email)
         return MailResult(ok=True, message_id=email["Message-ID"])
+
+
+def _write_outbox(outbox: Path, message: MailMessage, email: EmailMessage) -> None:
+    outbox.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+    safe_to = re.sub(r"[^A-Za-z0-9@._-]", "_", message.to)
+    (outbox / f"{stamp}-{safe_to}.eml").write_bytes(email.as_bytes())
 
 
 def get_mailer() -> Mailer:

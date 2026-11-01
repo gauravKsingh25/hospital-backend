@@ -356,6 +356,15 @@ class TestRoleAssignment:
             await service.assign_roles(session, receptionist, [Roles.PLATFORM_SUPPORT])
         assert excinfo.value.code == "invalid_role_assignment"
 
+    async def test_existing_staff_can_be_promoted_to_hospital_admin(
+        self, session: AsyncSession, receptionist: User, hospital_admin: User
+    ) -> None:
+        """A deputy administrator: someone the hospital already employs."""
+        codes = await service.assign_roles(
+            session, receptionist, [Roles.RECEPTIONIST, Roles.HOSPITAL_ADMIN], actor=hospital_admin
+        )
+        assert sorted(codes) == sorted([Roles.RECEPTIONIST, Roles.HOSPITAL_ADMIN])
+
     async def test_platform_support_has_only_console_permissions(
         self, session: AsyncSession
     ) -> None:

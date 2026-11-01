@@ -60,6 +60,9 @@ STAFF = [
     ("accountant@demo.hospital", "Anil Kapoor", Roles.ACCOUNTANT),
 ]
 
+# The platform owner: belongs to no hospital, lands on the platform console.
+PLATFORM_OWNER = ("platform@demo.hospital", "Gaurav Singh")
+
 # What a clinic must have configured before it can charge for anything. Without
 # a default rate card every charge lands at zero and flagged `needs_pricing`,
 # which is correct behaviour (billing never blocks clinical work) and makes for
@@ -220,11 +223,31 @@ async def seed(*, code: str, name: str, password: str) -> int:
                     # is right for a real first login and wrong for a browser
                     # test, which would spend every run on that screen.
                     must_change_password=False,
+                    # A seed script, like `create_admin.py`, is one of the two
+                    # places allowed to make an administrator without an invite.
+                    allow_privileged_roles=True,
                 )
                 created.append((email, role))
             if role == Roles.DOCTOR:
                 doctor_user_id = user.id
                 doctor_name = full_name
+
+    owner_email, owner_name = PLATFORM_OWNER
+    async with session_scope() as session, system_context(session):
+        if await identity_service.get_user_by_email(session, owner_email) is None:
+            await identity_service.create_user(
+                session,
+                UserCreate(
+                    email=owner_email,
+                    full_name=owner_name,
+                    password=password,
+                    role_codes=[Roles.PLATFORM_ADMIN],
+                ),
+                hospital_id=None,
+                must_change_password=False,
+                allow_privileged_roles=True,
+            )
+            created.append((owner_email, Roles.PLATFORM_ADMIN))
 
     # The doctor profile is separate from the user account: `scheduling` owns
     # who holds a clinic, `identity` owns who can sign in. A doctor without

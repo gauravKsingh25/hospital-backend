@@ -142,11 +142,17 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["sent_by_id"], ["users.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
     )
-    for column in ("kind", "to_email", "invite_id", "hospital_id", "status", "sent_by_id", "sent_at"):
+    for column in (
+        "kind",
+        "to_email",
+        "invite_id",
+        "hospital_id",
+        "status",
+        "sent_by_id",
+        "sent_at",
+    ):
         op.create_index(f"ix_platform_emails_{column}", "platform_emails", [column])
-    op.create_index(
-        "ix_platform_emails_status_sent_at", "platform_emails", ["status", "sent_at"]
-    )
+    op.create_index("ix_platform_emails_status_sent_at", "platform_emails", ["status", "sent_at"])
 
     # The app's non-owner role reaches these tables through the
     # `ALTER DEFAULT PRIVILEGES` that `scripts/bootstrap_db_role.py` set up.

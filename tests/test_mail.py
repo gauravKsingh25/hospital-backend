@@ -11,7 +11,7 @@ from __future__ import annotations
 import smtplib
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from pydantic import ValidationError
@@ -52,11 +52,15 @@ async def test_console_mailer_writes_outbox(
     )
 
     assert result.ok is True
-    files = list(tmp_path.glob("*.eml"))
-    assert len(files) == 1
-    content = files[0].read_text(encoding="utf-8")
+    contents = _outbox(tmp_path)
+    assert len(contents) == 1
+    content = contents[0]
     assert "hello http://x/invite/T" in content
     assert "Subject: S" in content
+
+
+def _outbox(directory: Path) -> list[str]:
+    return [path.read_text(encoding="utf-8") for path in directory.glob("*.eml")]
 
 
 class _FailingSMTP:
@@ -80,8 +84,8 @@ async def test_smtp_failure_returns_result_without_secret(
 
 
 class _RecordingSMTP:
-    calls: list[tuple[str, tuple[Any, ...]]] = []
-    sent: list[EmailMessage] = []
+    calls: ClassVar[list[tuple[str, tuple[Any, ...]]]] = []
+    sent: ClassVar[list[EmailMessage]] = []
 
     def __init__(self, host: str, port: int, timeout: float) -> None:
         self.calls.append(("connect", (host, port, timeout)))

@@ -299,6 +299,66 @@ class TestStaffAdministration:
         assert sorted(response.json()["roles"]) == sorted([Roles.NURSE, Roles.RECEPTIONIST])
 
 
+class TestAdministratorsOnlyByInvitation:
+    """Nobody types an administrator's password — not even the platform owner.
+
+    A brand-new account holding HOSPITAL_ADMIN or a platform role exists only
+    because someone accepted an emailed invite and chose their own password.
+    """
+
+    async def test_create_user_refuses_hospital_admin_role(
+        self, api: AsyncClient, hospital_admin: User
+    ) -> None:
+        token = await login(api, hospital_admin)
+        response = await api.post(
+            USERS,
+            json={
+                "email": "deputy@example.com",
+                "full_name": "Deputy Admin",
+                "password": STRONG_PASSWORD,
+                "role_codes": [Roles.HOSPITAL_ADMIN],
+            },
+            headers=auth(token),
+        )
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "invite_required"
+
+    async def test_create_user_refuses_platform_role_for_platform_admin(
+        self, api: AsyncClient, platform_admin: User
+    ) -> None:
+        token = await login(api, platform_admin)
+        response = await api.post(
+            USERS,
+            json={
+                "email": "support@example.com",
+                "full_name": "Support Person",
+                "password": STRONG_PASSWORD,
+                "role_codes": [Roles.PLATFORM_SUPPORT],
+            },
+            headers=auth(token),
+        )
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "invite_required"
+
+    async def test_platform_role_cannot_be_assigned_to_existing_platform_user(
+        self, api: AsyncClient, session: AsyncSession, platform_admin: User
+    ) -> None:
+        from tests.conftest import _make_user
+
+        support = await _make_user(session, role_code=Roles.PLATFORM_SUPPORT, hospital_id=None)
+        token = await login(api, platform_admin)
+        response = await api.post(
+            f"{USERS}/{support.id}/roles",
+            json={"role_codes": [Roles.PLATFORM_ADMIN]},
+            headers=auth(token),
+        )
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "invite_required"
+
+
 class TestPagination:
     async def test_list_endpoints_are_paginated(
         self, api: AsyncClient, hospital_admin: User

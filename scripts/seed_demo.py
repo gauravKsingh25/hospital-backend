@@ -27,6 +27,7 @@ import sys
 import uuid
 from decimal import Decimal
 
+from app.core.config import settings
 from app.core.database import dispose_engine, session_scope, system_context
 from app.core.exceptions import DomainError
 from app.core.pagination import MAX_PAGE_SIZE, PageParams
@@ -182,6 +183,10 @@ MEDICINES: list[
 
 
 async def seed(*, code: str, name: str, password: str) -> int:
+    # Every account here shares a password printed in the README, one of them a
+    # cross-tenant platform owner. On production that is a public master key.
+    if settings.is_production:
+        raise SystemExit("seed_demo.py refuses to run against production.")
     async with session_scope() as session, system_context(session):
         hospital = await tenancy_service.get_hospital_by_code(session, code)
         if hospital is None:

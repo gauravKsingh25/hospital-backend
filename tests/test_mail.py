@@ -128,3 +128,17 @@ async def test_smtp_mailer_sends_starttls(monkeypatch: pytest.MonkeyPatch) -> No
     assert sent["To"] == "a@b.in"
     assert result.ok is True
     assert result.message_id == sent["Message-ID"]
+
+
+def test_production_refuses_a_localhost_link_base() -> None:
+    """Review: an unset APP_PUBLIC_URL would send every real invite to localhost."""
+    with pytest.raises(ValidationError, match="APP_PUBLIC_URL"):
+        Settings(
+            **_DB,
+            ENVIRONMENT="production",
+            SECRET_KEY="x" * 40,
+            DEBUG=False,
+            MAIL_BACKEND="smtp",
+            SMTP_USERNAME="owner@gmail.com",
+            SMTP_PASSWORD="app-pass-123",
+        )

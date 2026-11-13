@@ -40,6 +40,7 @@ from app.modules.identity.schemas import (
     InviteAccept,
     InvitePreviewRead,
     InviteRead,
+    InviteToken,
     PlatformAdminRow,
     PlatformEmailRead,
     PlatformHospitalDetail,
@@ -134,9 +135,11 @@ async def issue_and_send(
 # ---------------------------------------------------------------------------
 # The invited person (unauthenticated)
 # ---------------------------------------------------------------------------
-@invites_router.get("/{token}", response_model=InvitePreviewRead, summary="Preview an invite")
-async def preview_invite(token: str, session: SessionDep) -> InvitePreviewRead:
-    preview = await invites.preview_invite(session, token)
+# POST with the token in the body, for both: a token in the path would be
+# written to the access log on every page view.
+@invites_router.post("/preview", response_model=InvitePreviewRead, summary="Preview an invite")
+async def preview_invite(payload: InviteToken, session: SessionDep) -> InvitePreviewRead:
+    preview = await invites.preview_invite(session, payload.token)
     await session.commit()
     return InvitePreviewRead(
         full_name=preview.full_name,
@@ -150,17 +153,17 @@ async def preview_invite(token: str, session: SessionDep) -> InvitePreviewRead:
 
 
 @invites_router.post(
-    "/{token}/accept",
+    "/accept",
     response_model=TokenPair | TwoFactorChallengeRead,
     summary="Accept an invite: set a password and sign in",
 )
 async def accept_invite(
-    token: str, payload: InviteAccept, session: SessionDep, request: Request
+    payload: InviteAccept, session: SessionDep, request: Request
 ) -> TokenPair | TwoFactorChallengeRead:
     try:
         user, access_token, refresh_token, expires_in = await invites.accept_invite(
             session,
-            token,
+            payload.token,
             password=payload.password,
             ip_address=await get_client_ip(request),
             user_agent=request.headers.get("user-agent"),
@@ -281,10 +284,7 @@ def _team_row(user: User, roles: list[str]) -> PlatformTeamRow:
 
 async def _hospital_detail(session: SessionDep, hospital_id: uuid.UUID) -> PlatformHospitalDetail:
     hospital = await tenancy_service.get_hospital(session, hospital_id)
-    rows, _ = await platform.list_platform_hospitals(
-        session, PageParams(limit=1, offset=0), search=hospital.code
-    )
-    status_ = next((row.status for row in rows if row.hospital.id == hospital.id), "active")
+    status_ = await platform.hospital_status(session, hospital)
     admins = (await platform.hospital_admins(session, [hospital.id])).get(hospital.id, [])
     invite_rows, _ = await invites.list_invites(
         session, PageParams(limit=20, offset=0), hospital_id=hospital.id
@@ -456,7 +456,7 @@ async def list_activity(
     action: Annotated[str | None, Query(max_length=100)] = None,
     actor_user_id: uuid.UUID | None = None,
 ) -> Page[AuditLogRead]:
-    entries, total = await service.list_audit_logs(
+    entries, total = await platform.list_platform_activity(
         session, params, hospital_id=hospital_id, action=action, actor_user_id=actor_user_id
     )
     return Page.build(

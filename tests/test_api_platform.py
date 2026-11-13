@@ -303,3 +303,64 @@ async def test_activity_log_filters_by_action(api: AsyncClient, platform_admin: 
 
     assert body["total"] >= 1
     assert {row["action"] for row in body["items"]} == {"invite.create"}
+
+
+async def test_activity_log_never_shows_hospital_patient_actions(
+    api: AsyncClient, session: AsyncSession, hospital: Hospital, receptionist: User
+) -> None:
+    """Review C1: the platform team must not read a hospital's clinical trail.
+
+    Isolation is lifted for platform users, so the activity log is filtered to
+    platform actions — a patient search or a recorded death stays the
+    hospital's own business.
+    """
+    from app.modules.identity import service as identity_service
+
+    await identity_service.record_audit(
+        session,
+        action="patient.search",
+        actor=receptionist,
+        hospital_id=hospital.id,
+        changes={"query": "Asha 98123"},
+    )
+    await identity_service.record_audit(
+        session,
+        action="encounter.record_death",
+        actor=receptionist,
+        hospital_id=hospital.id,
+        changes={"cause": "secret"},
+    )
+    await session.commit()
+    support = await _make_user(session, role_code=Roles.PLATFORM_SUPPORT, hospital_id=None)
+    token = await login(api, support)
+
+    everything = (
+        await api.get(f"{PLATFORM}/audit", params={"limit": 200}, headers=auth(token))
+    ).json()
+    asked = (
+        await api.get(f"{PLATFORM}/audit", params={"action": "patient.search"}, headers=auth(token))
+    ).json()
+
+    actions = {row["action"] for row in everything["items"]}
+    assert "patient.search" not in actions
+    assert "encounter.record_death" not in actions
+    assert asked["total"] == 0
+
+
+async def test_hospital_detail_status_is_the_hospitals_own(
+    api: AsyncClient, session: AsyncSession, platform_admin: User
+) -> None:
+    """Review: a similar code sorting first must not lend its status."""
+    suffix = uuid.uuid4().hex[:4].upper()
+    async with db.system_context(session):
+        mine = Hospital(code=f"S{suffix}", name="Zeta Hospital", is_active=False)
+        other = Hospital(code=f"S{suffix}0", name="Alpha Hospital", is_active=True)
+        session.add_all([mine, other])
+        await session.flush()
+        mine_id = mine.id
+    await session.commit()
+    owner = await login(api, platform_admin)
+
+    body = (await api.get(f"{PLATFORM}/hospitals/{mine_id}", headers=auth(owner))).json()
+
+    assert body["status"] == "suspended"

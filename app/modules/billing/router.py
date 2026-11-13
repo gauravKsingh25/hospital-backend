@@ -80,6 +80,7 @@ from app.modules.clinical import service as clinical_service
 from app.modules.identity import service as identity_service
 from app.modules.identity.service import AuthContext
 from app.modules.patients import service as patients_service
+from app.modules.patients.rbac import PatientPermissions
 from app.modules.patients.schemas import PatientRead
 from app.modules.tenancy import service as tenancy_service
 
@@ -106,6 +107,12 @@ CanAddCharge = Annotated[AuthContext, Depends(require(BillingPermissions.CHARGE_
 CanDiscount = Annotated[AuthContext, Depends(require(BillingPermissions.CHARGE_DISCOUNT))]
 CanWaive = Annotated[AuthContext, Depends(require(BillingPermissions.CHARGE_WAIVE))]
 CanReadInvoice = Annotated[AuthContext, Depends(require(BillingPermissions.INVOICE_READ))]
+CanReadAllInvoices = Annotated[
+    AuthContext, Depends(require(BillingPermissions.INVOICE_READ_ALL))
+]
+CanReadPatientBills = Annotated[
+    AuthContext, Depends(require(BillingPermissions.PATIENT_BILLS_READ))
+]
 CanCreateInvoice = Annotated[AuthContext, Depends(require(BillingPermissions.INVOICE_CREATE))]
 CanIssueInvoice = Annotated[AuthContext, Depends(require(BillingPermissions.INVOICE_ISSUE))]
 CanCancelInvoice = Annotated[AuthContext, Depends(require(BillingPermissions.INVOICE_CANCEL))]
@@ -150,6 +157,30 @@ async def _require_ipd_power(
             code="ipd_bill_accounts_only",
             details={"required": [permission]},
         )
+
+
+def _require_list_scope(
+    context: AuthContext, *, visit_scoped: bool, patient_id: uuid.UUID | None
+) -> None:
+    """A list wider than one visit needs the power to read that wide.
+
+    `invoice:read` is the counter's: the visit at the desk. One patient's bills
+    across visits need `patient_bills:read`, and anything wider needs
+    `invoice:read_all` — otherwise a front desk that collects today's fee could
+    page through what every patient has ever owed.
+    """
+    if visit_scoped or context.has_permission(BillingPermissions.INVOICE_READ_ALL):
+        return
+    if patient_id is not None and context.has_permission(BillingPermissions.PATIENT_BILLS_READ):
+        return
+    required = [BillingPermissions.INVOICE_READ_ALL]
+    if patient_id is not None:
+        required.append(BillingPermissions.PATIENT_BILLS_READ)
+    raise PermissionDeniedError(
+        "You may only read the bills of the visit in front of you.",
+        code="billing_scope_visit_only",
+        details={"required": required},
+    )
 
 
 async def _render(session: SessionDep, invoice: Invoice, *, hospital_id: uuid.UUID) -> InvoiceRead:
@@ -507,7 +538,7 @@ async def waive_charge(
 )
 async def accounts_board(
     session: SessionDep,
-    context: CanReadCharge,
+    context: CanReadAllInvoices,
     tenant_id: TenantId,
     params: Annotated[PageParams, Depends(page_params)],
 ) -> Page[AccountBoardEntry]:
@@ -1007,7 +1038,11 @@ async def list_invoices(
     awaiting_settlement: bool = False,
 ) -> Page[InvoiceSummary]:
     """`awaiting_settlement=true` is the bills left behind by a death, a referral
-    or a patient who walked out (CLAUDE.md §6)."""
+    or a patient who walked out (CLAUDE.md §6).
+
+    Scoped to one visit, `invoice:read` is enough; wider needs more — see
+    `_require_list_scope`."""
+    _require_list_scope(context, visit_scoped=encounter_id is not None, patient_id=patient_id)
     invoices, total = await service.list_invoices(
         session,
         params,
@@ -1321,7 +1356,11 @@ async def list_payments(
     method: PaymentMethod | None = None,
     since: datetime | None = None,
 ) -> Page[PaymentRead]:
-    """With `method` and `since`, this is the shift's collection report."""
+    """With `method` and `since`, this is the shift's collection report.
+
+    Receipts for one bill need only `payment:read`; wider lists need more —
+    see `_require_list_scope`."""
+    _require_list_scope(context, visit_scoped=invoice_id is not None, patient_id=patient_id)
     payments, total = await service.list_payments(
         session,
         params,
@@ -1459,10 +1498,17 @@ async def progress_claim(
     "/{patient_id}/history", response_model=BillHistory, summary="A patient's bill history"
 )
 async def patient_bill_history(
-    patient_id: uuid.UUID, session: SessionDep, context: CanReadAccounts, tenant_id: TenantId
+    patient_id: uuid.UUID, session: SessionDep, context: CanReadPatientBills, tenant_id: TenantId
 ) -> BillHistory:
-    """Every bill-bearing visit, newest first, with lifetime billed, paid, due."""
-    return await accounts.bill_history(session, patient_id, hospital_id=tenant_id)
+    """Every bill-bearing visit, newest first, with lifetime billed, paid, due.
+
+    The accountant's patient page and the patient record's Billing tab. The
+    phone is masked for a reader who may not see contact numbers — a doctor
+    reads the dues here, not the patient's mobile."""
+    history = await accounts.bill_history(session, patient_id, hospital_id=tenant_id)
+    if not context.has_permission(PatientPermissions.READ_IDENTIFIERS):
+        history.patient.phone = patients_service.mask_phone(history.patient.phone)
+    return history
 
 
 @billing_patients_router.get(

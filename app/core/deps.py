@@ -89,8 +89,9 @@ async def get_auth_context(
         # The platform roles are the ones CLAUDE.md §3 permits to cross
         # tenants; their queries legitimately span hospitals, so isolation is
         # lifted for the request rather than fought around query by query.
-        # PLATFORM_SUPPORT holds no tenant-data permission, so the lifted
-        # isolation reaches only the console's counts, never a patient.
+        # PLATFORM_SUPPORT holds no tenant-data permission; the one console
+        # route that reads tenant rows directly, the activity log, filters to
+        # platform actions (`identity.platform.list_platform_activity`).
         await set_bypass_rls(session, enabled=True)
     elif context.hospital_id is not None:
         await set_tenant_context(session, context.hospital_id)

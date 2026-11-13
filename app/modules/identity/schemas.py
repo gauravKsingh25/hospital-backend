@@ -26,6 +26,7 @@ __all__ = [
     "InviteAccept",
     "InvitePreviewRead",
     "InviteRead",
+    "InviteToken",
     "LoginRequest",
     "PermissionRead",
     "PlatformAdminRow",
@@ -265,9 +266,16 @@ class AuditLogRead(BaseModel):
 # ---------------------------------------------------------------------------
 # Invitations and platform email
 # ---------------------------------------------------------------------------
-class InviteAccept(BaseModel):
+class InviteToken(BaseModel):
+    """The link token, in a request body — never a URL path, which every
+    access log would record."""
+
     model_config = ConfigDict(extra="forbid")
 
+    token: Annotated[str, Field(min_length=1, max_length=256)]
+
+
+class InviteAccept(InviteToken):
     password: Annotated[str, Field(min_length=1, max_length=256)]
 
 

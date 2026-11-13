@@ -65,9 +65,11 @@ def test_accountant_holds_exactly_the_ipd_billing_powers() -> None:
         "charge:read",
         "invoice:read",
         "payment:read",
+        "payment:record",
     } <= accountant
-    # Money is taken at the counter, not by the person who corrects the bill.
-    assert "payment:record" not in accountant
+    # The accountant marks a payment received; giving money back, or deciding
+    # less is owed outside the IPD bill, stays with billing staff.
+    assert not accountant & {"payment:reverse", "invoice:write_off", "charge:waive"}
 
     assert {"accounts:read", *_IPD_POWERS} <= grants[Roles.HOSPITAL_ADMIN]
     for role in (Roles.CASHIER, Roles.RECEPTIONIST, Roles.BILLING_STAFF, Roles.PHARMACIST):

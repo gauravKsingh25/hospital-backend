@@ -413,6 +413,24 @@ class TestSweep:
         assert done.status == InviteStatus.ACCEPTED
 
 
+async def test_scheduled_sweep_expires_invites(
+    session: AsyncSession, hospital: Hospital, platform_admin: User
+) -> None:
+    """The worker's hourly run marks stale invites, alongside the tenant nets."""
+    from app.workers import tasks
+
+    invite, _ = await _invite(session, hospital, platform_admin, email="stale@example.com")
+    invite.expires_at = utc_now() - timedelta(hours=1)
+    session.add(invite)
+    await session.commit()
+
+    totals = await tasks.run_sweeps()
+
+    assert totals["invites_expired"] == 1
+    await session.refresh(invite)
+    assert invite.status == InviteStatus.EXPIRED
+
+
 async def test_platform_email_rows_are_listed_newest_first(
     session: AsyncSession, hospital: Hospital, platform_admin: User, mailer: FakeMailer
 ) -> None:
@@ -430,3 +448,58 @@ async def test_platform_email_rows_are_listed_newest_first(
     assert total == 2
     assert [row.to_email for row in rows] == ["b@example.com", "a@example.com"]
     assert all(isinstance(row, PlatformEmail) for row in rows)
+
+
+async def test_revoke_waiting_on_an_accept_does_not_overwrite_it(
+    session: AsyncSession, hospital: Hospital, platform_admin: User
+) -> None:
+    """Review I3: a cancel that lands while the link is being accepted loses."""
+    from sqlmodel import select
+
+    invite, _ = await _invite(session, hospital, platform_admin, email="race@example.com")
+
+    async with db.get_sessionmaker()() as accepting:
+        held = (
+            (
+                await accepting.execute(
+                    select(Invite).where(Invite.id == invite.id).with_for_update()
+                )
+            )
+            .scalars()
+            .one()
+        )
+
+        async def revoke() -> object:
+            async with db.get_sessionmaker()() as other:
+                try:
+                    result = await invites.revoke_invite(other, invite.id, actor=platform_admin)
+                    await other.commit()
+                    return result
+                except ConflictError as error:
+                    return error
+
+        task = asyncio.create_task(revoke())
+        await asyncio.sleep(0.5)
+        held.status = InviteStatus.ACCEPTED
+        accepting.add(held)
+        await accepting.commit()
+        outcome = await task
+
+    assert isinstance(outcome, ConflictError)
+    await session.refresh(invite)
+    assert invite.status == InviteStatus.ACCEPTED
+
+
+async def test_resending_a_replaced_invite_is_a_conflict(
+    session: AsyncSession, hospital: Hospital, platform_admin: User
+) -> None:
+    """Review I4: an old expired invite whose address has a newer one waiting."""
+    old, _ = await _invite(session, hospital, platform_admin, email="again@example.com")
+    old.status = InviteStatus.EXPIRED
+    session.add(old)
+    await session.commit()
+    await _invite(session, hospital, platform_admin, email="again@example.com")
+
+    with pytest.raises(ConflictError) as excinfo:
+        await invites.resend_invite(session, old.id, actor=platform_admin)
+    assert excinfo.value.code == "invite_pending"

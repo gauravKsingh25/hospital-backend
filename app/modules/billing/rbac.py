@@ -12,6 +12,12 @@ to pocket the difference. A cashier gets the first and not the others.
 **Setting prices is not using them.** `ratecard:manage` changes what the hospital
 charges everybody. That belongs with administration, not with the counter.
 
+**One visit's bill is not everybody's bills.** `invoice:read` is the counter's:
+the bill in front of it, the visit at the desk. A patient's bills across every
+visit (`patient_bills:read`) and the whole hospital's (`invoice:read_all`) are
+asked for by name, so a front desk that takes today's fee does not also browse
+what every patient has ever owed.
+
 **Reading a bill is not reading a chart.** Finance roles get invoices and charges
 and, from `clinical`, nothing but the fact that a visit exists and what was
 ordered on it. The examination note is not theirs.
@@ -43,7 +49,13 @@ class BillingPermissions:
     CHARGE_DISCOUNT = "charge:discount"
 
     # --- the document -----------------------------------------------------
+    # One bill, or one visit's bills: what a counter needs to collect.
     INVOICE_READ = "invoice:read"
+    # Every patient's bills and dues: the counter board, the worklists.
+    INVOICE_READ_ALL = "invoice:read_all"
+    # One patient's bills, payments and dues across all their visits: the
+    # Billing tab of the patient record.
+    PATIENT_BILLS_READ = "patient_bills:read"
     INVOICE_CREATE = "invoice:create"
     # One-way door: after this the lines are frozen.
     INVOICE_ISSUE = "invoice:issue"
@@ -70,7 +82,7 @@ class BillingPermissions:
     # invoice:issue / cancel / write_off, whoever else holds those.
     IPD_BILL_EDIT = "ipd_bill:edit"
     IPD_BILL_FINALISE = "ipd_bill:finalise"
-    # The accounts dashboard, bill history, cost journey and printable bills.
+    # The accounts dashboard, cost journey and printable running bills.
     ACCOUNTS_READ = "accounts:read"
 
 
@@ -84,6 +96,16 @@ PERMISSION_CATALOGUE: Final[tuple[PermissionDef, ...]] = (
     PermissionDef(BillingPermissions.CHARGE_WAIVE, MODULE, "Waive a charge."),
     PermissionDef(BillingPermissions.CHARGE_DISCOUNT, MODULE, "Discount a charge."),
     PermissionDef(BillingPermissions.INVOICE_READ, MODULE, "View invoices."),
+    PermissionDef(
+        BillingPermissions.INVOICE_READ_ALL,
+        MODULE,
+        "View every patient's bills and dues: the counter board and billing worklists.",
+    ),
+    PermissionDef(
+        BillingPermissions.PATIENT_BILLS_READ,
+        MODULE,
+        "View a patient's bills, payments and dues across all their visits.",
+    ),
     PermissionDef(BillingPermissions.INVOICE_CREATE, MODULE, "Assemble a draft invoice."),
     PermissionDef(BillingPermissions.INVOICE_ISSUE, MODULE, "Issue an invoice to a patient."),
     PermissionDef(BillingPermissions.INVOICE_CANCEL, MODULE, "Cancel an invoice."),
@@ -122,13 +144,23 @@ _READ = (
 # The counter. Everything needed to turn a finished visit into a paid one, and
 # nothing that reduces what is owed. A cashier who could waive a charge and take
 # the cash is a cashier the hospital cannot audit.
-_CASHIER = (
+_COUNTER = (
     *_READ,
     BillingPermissions.CHARGE_ADD,
     BillingPermissions.INVOICE_CREATE,
     BillingPermissions.INVOICE_ISSUE,
     BillingPermissions.PAYMENT_RECORD,
 )
+
+# Who reads beyond the visit in front of them: a patient's bills, every bill.
+_BEYOND_THE_VISIT = (
+    BillingPermissions.INVOICE_READ_ALL,
+    BillingPermissions.PATIENT_BILLS_READ,
+)
+
+# A cashier is the money desk: the board of who owes, and a patient's dues
+# when they ask "what do I still owe?".
+_CASHIER = (*_COUNTER, *_BEYOND_THE_VISIT)
 
 # Billing staff run the back office: claims, concessions, corrections. They
 # reverse payments and write off bad debt; they do not set the price list.
@@ -144,15 +176,21 @@ _BILLING_STAFF = (
 )
 
 # Reception doubles as the cash counter in most mid-size hospitals — CLAUDE.md
-# §8 says as much ("can be merged with receptionist"). Same powers as a cashier,
-# for the same reason.
-_RECEPTION = _CASHIER
+# §8 says as much ("can be merged with receptionist"). It collects today's fee
+# for the visit at the desk and nothing more: no board of every patient's dues,
+# no patient's billing history. A hospital whose front desk is also its money
+# desk gives that person the CASHIER role as well.
+_RECEPTION = _COUNTER
 
-# The accountant corrects and finalises IPD bills and reads everything billed,
-# but takes no money: a person who sets the final figure and also pockets the
-# cash is the separation `payment:record` exists to prevent.
+# The accountant corrects and finalises IPD bills, reads everything billed, and
+# records a payment received against a bill — the settlement of a final bill is
+# usually paid at the accounts office. The hospital chose this over keeping the
+# accountant away from the cash; every receipt is audit-logged with who took it,
+# and reversing one (`payment:reverse`) stays with billing staff.
 _ACCOUNTANT = (
     *_READ,
+    *_BEYOND_THE_VISIT,
+    BillingPermissions.PAYMENT_RECORD,
     BillingPermissions.CLAIM_READ,
     BillingPermissions.ACCOUNTS_READ,
     BillingPermissions.IPD_BILL_EDIT,
@@ -160,8 +198,13 @@ _ACCOUNTANT = (
 )
 
 # A doctor should be able to see whether the patient in front of them has an
-# unpaid bill — it changes the conversation — without being able to alter it.
-_DOCTOR = (BillingPermissions.CHARGE_READ, BillingPermissions.INVOICE_READ)
+# unpaid bill — it changes the conversation — without being able to alter it,
+# or to browse what every other patient owes.
+_DOCTOR = (
+    BillingPermissions.CHARGE_READ,
+    BillingPermissions.INVOICE_READ,
+    BillingPermissions.PATIENT_BILLS_READ,
+)
 
 MODULE_ROLE_PERMISSIONS: Final[dict[str, tuple[str, ...]]] = {
     Roles.PLATFORM_ADMIN: _ALL,
@@ -182,7 +225,7 @@ MODULE_ROLE_PERMISSIONS: Final[dict[str, tuple[str, ...]]] = {
     Roles.PATHOLOGIST: (BillingPermissions.SERVICE_READ, BillingPermissions.RATECARD_READ),
     Roles.RADIOLOGIST: (BillingPermissions.SERVICE_READ, BillingPermissions.RATECARD_READ),
     Roles.RECORDS_OFFICER: (BillingPermissions.INVOICE_READ, BillingPermissions.CHARGE_READ),
-    Roles.AUDITOR: (*_READ, BillingPermissions.CLAIM_READ),
+    Roles.AUDITOR: (*_READ, *_BEYOND_THE_VISIT, BillingPermissions.CLAIM_READ),
     # The cost of a stay, on the admission page. Reading it only: the desk
     # records what was used (`medicine:issue`) and billing does the charging.
     Roles.ADMISSION_DESK: (BillingPermissions.CHARGE_READ,),

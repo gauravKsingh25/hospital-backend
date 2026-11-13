@@ -332,6 +332,12 @@ class Settings(BaseSettings):
                 raise ValueError(f"MAIL_BACKEND=smtp needs {', '.join(missing)} to be set")
         if self.is_production and self.MAIL_BACKEND != "smtp":
             raise ValueError("MAIL_BACKEND must be 'smtp' in production")
+        if self.is_production and (
+            not self.APP_PUBLIC_URL.startswith("https://") or "localhost" in self.APP_PUBLIC_URL
+        ):
+            # Every invite link starts with this; left at its default, every
+            # real invitation would send a hospital administrator to localhost.
+            raise ValueError("APP_PUBLIC_URL must be the public https:// address in production")
         return self
 
     # --- Derived -----------------------------------------------------------

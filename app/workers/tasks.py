@@ -45,6 +45,7 @@ from app.core.config import settings
 from app.core.database import session_scope, tenant_session
 from app.core.pagination import MAX_PAGE_SIZE, PageParams
 from app.modules.clinical import service as clinical_service
+from app.modules.identity import invites as identity_invites
 from app.modules.ipd import service as ipd_service
 from app.modules.notifications import service as notifications_service
 from app.modules.scheduling import service as scheduling_service
@@ -53,6 +54,7 @@ from app.modules.tenancy import service as tenancy_service
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "expire_invites",
     "run_sweeps",
     "sweep_hospital",
     "sweep_ipd",
@@ -144,6 +146,18 @@ async def sweep_ipd(hospital_id: uuid.UUID) -> dict[str, int]:
         return await _sweep_ipd(hospital_id, session)
 
 
+async def expire_invites() -> int:
+    """Mark invites past their expiry. Platform-level, so outside the tenant loop.
+
+    Bookkeeping for the console's lists only: an expired link is refused on
+    accept whether or not this has run.
+    """
+    async with session_scope() as session:
+        expired = await identity_invites.expire_due_invites(session)
+        await session.commit()
+    return expired
+
+
 async def run_sweeps(ctx: dict[str, Any] | None = None) -> dict[str, int]:
     """The scheduled entry point. Returns a per-run tally for the job log.
 
@@ -165,6 +179,11 @@ async def run_sweeps(ctx: dict[str, Any] | None = None) -> dict[str, int]:
             continue
         for key, value in result.items():
             totals[key] = totals.get(key, 0) + value
+
+    try:
+        totals["invites_expired"] = await expire_invites()
+    except Exception:
+        logger.exception("invite expiry sweep failed")
 
     if any(totals.values()):
         logger.info("sweep complete %s", totals)

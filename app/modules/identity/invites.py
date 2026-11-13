@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import ColumnElement, func, update
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -99,8 +100,14 @@ class InvitePreview:
 # ---------------------------------------------------------------------------
 # Lookups
 # ---------------------------------------------------------------------------
-async def get_invite(session: AsyncSession, invite_id: uuid.UUID) -> Invite:
-    invite = await session.get(Invite, invite_id)
+async def get_invite(session: AsyncSession, invite_id: uuid.UUID, *, lock: bool = False) -> Invite:
+    """One invite. `lock` for a write: a resend or cancel that arrives while the
+    link is being accepted waits for the accept, then sees ACCEPTED — instead of
+    overwriting it and showing "cancelled" for an account that now exists."""
+    statement = select(Invite).where(Invite.id == invite_id)
+    if lock:
+        statement = statement.with_for_update().execution_options(populate_existing=True)
+    invite = (await session.execute(statement)).scalars().first()
     if invite is None:
         raise NotFoundError("Invite not found.", code="invite_not_found")
     return invite
@@ -179,9 +186,32 @@ async def _new_invite(
         invited_by_id=actor.id,
     )
     session.add(invite)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as error:
+        # Two submits for one address at once: the partial unique index lets
+        # one through. The other is the same conflict the pre-check reports.
+        raise ConflictError(
+            "This address already has an invite waiting.", code="invite_pending"
+        ) from error
     await session.refresh(invite)
     return invite, raw_token
+
+
+async def _live_invite_for(session: AsyncSession, email: str) -> Invite | None:
+    """The PENDING invite for an address, if any (expired or not)."""
+    return (
+        (
+            await session.execute(
+                select(Invite).where(
+                    func.lower(Invite.email) == email.strip().lower(),
+                    Invite.status == InviteStatus.PENDING,
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
 
 
 async def create_invite(
@@ -215,18 +245,7 @@ async def create_invite(
             "An account with that email address already exists.", code="email_taken"
         )
 
-    existing = (
-        (
-            await session.execute(
-                select(Invite).where(
-                    func.lower(Invite.email) == normalised,
-                    Invite.status == InviteStatus.PENDING,
-                )
-            )
-        )
-        .scalars()
-        .first()
-    )
+    existing = await _live_invite_for(session, normalised)
     if existing is not None:
         if not _is_expired(existing):
             raise ConflictError(
@@ -266,7 +285,7 @@ async def resend_invite(
     The old link dies here rather than living on beside the new one — an inbox
     holding two working links to an administrator account is one too many.
     """
-    old = await get_invite(session, invite_id)
+    old = await get_invite(session, invite_id, lock=True)
     if old.status not in (InviteStatus.PENDING, InviteStatus.EXPIRED):
         raise ConflictError(
             f"This invite is {old.status.lower()} and cannot be resent.",
@@ -282,6 +301,13 @@ async def resend_invite(
     if await get_user_by_email(session, old.email) is not None:
         raise ConflictError(
             "An account with that email address already exists.", code="email_taken"
+        )
+    newer = await _live_invite_for(session, old.email)
+    if newer is not None and newer.id != old.id:
+        raise ConflictError(
+            "A newer invite is already waiting for this address. Resend that one instead.",
+            code="invite_pending",
+            details={"invite_id": str(newer.id)},
         )
 
     now = utc_now()
@@ -318,7 +344,7 @@ async def resend_invite(
 
 
 async def revoke_invite(session: AsyncSession, invite_id: uuid.UUID, *, actor: User) -> Invite:
-    invite = await get_invite(session, invite_id)
+    invite = await get_invite(session, invite_id, lock=True)
     if invite.status != InviteStatus.PENDING:
         raise ConflictError(
             f"This invite is {invite.status.lower()} and cannot be cancelled.",

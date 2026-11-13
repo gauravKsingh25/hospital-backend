@@ -75,12 +75,14 @@ async def test_owner_invites_admin_then_admin_signs_in(
     assert invite["hospital_name"] == hospital.name
 
     link_token = mailer.last_token()
-    preview = await api.get(f"/api/v1/invites/{link_token}")
+    preview = await api.post("/api/v1/invites/preview", json={"token": link_token})
     assert preview.status_code == 200, preview.text
     assert preview.json()["hospital_name"] == hospital.name
     assert preview.json()["email"] == "admin.one@example.com"
 
-    accepted = await api.post(f"/api/v1/invites/{link_token}/accept", json={"password": PASSWORD})
+    accepted = await api.post(
+        "/api/v1/invites/accept", json={"token": link_token, "password": PASSWORD}
+    )
     assert accepted.status_code == 200, accepted.text
     access = accepted.json()["access_token"]
 
@@ -95,16 +97,18 @@ async def test_used_link_is_refused_with_its_reason(
     owner = await login(api, platform_admin)
     await _invite(api, owner, hospital, "admin.two@example.com")
     link_token = mailer.last_token()
-    await api.post(f"/api/v1/invites/{link_token}/accept", json={"password": PASSWORD})
+    await api.post("/api/v1/invites/accept", json={"token": link_token, "password": PASSWORD})
 
-    again = await api.post(f"/api/v1/invites/{link_token}/accept", json={"password": PASSWORD})
+    again = await api.post(
+        "/api/v1/invites/accept", json={"token": link_token, "password": PASSWORD}
+    )
 
     assert again.status_code == 409
     assert again.json()["error"]["code"] == "invite_used"
 
 
 async def test_preview_unknown_token_404(api: AsyncClient) -> None:
-    response = await api.get("/api/v1/invites/not-a-real-token")
+    response = await api.post("/api/v1/invites/preview", json={"token": "not-a-real-token"})
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "invite_invalid"
@@ -193,3 +197,25 @@ async def test_invites_list_by_status(
     body = response.json()
     assert body["total"] == 1
     assert body["items"][0]["invited_by_name"] == platform_admin.full_name
+
+
+async def test_token_travels_in_the_body_not_the_path(
+    api: AsyncClient, hospital: Hospital, platform_admin: User, mailer: CapturingMailer
+) -> None:
+    """Review I2: a token in a URL path lands in every access log."""
+    owner = await login(api, platform_admin)
+    await _invite(api, owner, hospital, "body.token@example.com")
+    link_token = mailer.last_token()
+
+    preview = await api.post("/api/v1/invites/preview", json={"token": link_token})
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["email"] == "body.token@example.com"
+
+    accepted = await api.post(
+        "/api/v1/invites/accept", json={"token": link_token, "password": PASSWORD}
+    )
+    assert accepted.status_code == 200, accepted.text
+
+    # The old path-token route is gone.
+    old_route = await api.get(f"/api/v1/invites/{link_token}")
+    assert old_route.status_code in (404, 405)

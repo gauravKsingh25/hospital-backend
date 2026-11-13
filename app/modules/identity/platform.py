@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
-from sqlalchemy import ColumnElement, func, or_
+from sqlalchemy import ColumnElement, and_, func, or_
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -47,6 +47,8 @@ __all__ = [
     "HospitalStatus",
     "deactivate_platform_user",
     "hospital_admins",
+    "hospital_status",
+    "list_platform_activity",
     "list_platform_hospitals",
     "list_platform_team",
     "overview",
@@ -62,6 +64,11 @@ STALE_ADMIN_DAYS = 14
 # "Expiring soon" for an invite — inside a day there is still time to nudge.
 EXPIRING_SOON = timedelta(hours=24)
 _ACTIVITY_PREFIXES = ("invite.", "hospital.", "email.")
+# What the activity log may show. Isolation is lifted for platform users, so
+# this filter is what keeps a hospital's clinical trail (patient searches,
+# recorded deaths) out of the platform team's view: platform actions, sign-ins,
+# and account changes to the platform team itself — nothing else.
+_VISIBLE_PREFIXES = (*_ACTIVITY_PREFIXES, "auth.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,6 +388,59 @@ async def _attention(
                 )
             )
     return items[:20]
+
+
+# ---------------------------------------------------------------------------
+# The activity log
+# ---------------------------------------------------------------------------
+def _visible_to_platform() -> ColumnElement[bool]:
+    return or_(
+        *(col(AuditLog.action).startswith(prefix) for prefix in _VISIBLE_PREFIXES),
+        and_(col(AuditLog.action).startswith("user."), col(AuditLog.hospital_id).is_(None)),
+    )
+
+
+async def list_platform_activity(
+    session: AsyncSession,
+    params: PageParams,
+    *,
+    hospital_id: uuid.UUID | None = None,
+    action: str | None = None,
+    actor_user_id: uuid.UUID | None = None,
+) -> tuple[list[AuditLog], int]:
+    filters: list[ColumnElement[bool]] = [_visible_to_platform()]
+    if hospital_id is not None:
+        filters.append(col(AuditLog.hospital_id) == hospital_id)
+    if action:
+        filters.append(col(AuditLog.action) == action)
+    if actor_user_id is not None:
+        filters.append(col(AuditLog.actor_user_id) == actor_user_id)
+    async with system_context(session):
+        total = (
+            await session.execute(select(func.count()).select_from(AuditLog).where(*filters))
+        ).scalar_one()
+        rows = (
+            (
+                await session.execute(
+                    select(AuditLog)
+                    .where(*filters)
+                    .order_by(col(AuditLog.created_at).desc())
+                    .limit(params.limit)
+                    .offset(params.offset)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return list(rows), int(total)
+
+
+async def hospital_status(session: AsyncSession, hospital: Hospital) -> HospitalStatus:
+    """This hospital's own status — never inferred from a search that could
+    match another hospital first."""
+    if not hospital.is_active:
+        return "suspended"
+    return "invite_pending" if hospital.id in await _awaiting_admin(session) else "active"
 
 
 # ---------------------------------------------------------------------------

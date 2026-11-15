@@ -39,6 +39,7 @@ from app.modules.identity.schemas import (
     UserUpdate,
 )
 from app.modules.identity.service import AuthContext
+from app.modules.subscriptions.schemas import EntitlementsRead
 
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
 users_router = APIRouter(prefix="/users", tags=["users"])
@@ -134,6 +135,12 @@ async def me(context: CurrentUser) -> CurrentUserRead:
             "roles": sorted(context.roles),
             "permissions": sorted(context.permissions),
             "two_factor_required": bool(context.roles & settings.two_factor_roles),
+            # Platform users belong to no hospital and have none.
+            "entitlements": (
+                EntitlementsRead.for_hospital(context.entitlements)
+                if context.hospital_id is not None and not context.is_platform_user
+                else None
+            ),
         }
     )
 

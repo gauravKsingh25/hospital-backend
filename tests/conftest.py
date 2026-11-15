@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
+import redis.exceptions
 import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.engine import URL, make_url
@@ -27,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import database as db
 from app.core.config import settings
 from app.core.events import event_bus
-from app.core.redis import close_redis
+from app.core.redis import close_redis, get_redis
 from app.core.security import hash_password
 from app.modules.identity.models import Role, User, UserRole
 from app.modules.identity.rbac import Roles
@@ -46,6 +47,51 @@ TEST_PASSWORD = "correct-horse-battery-staple"
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "integration: touches a real database or Redis instance")
+    config.addinivalue_line(
+        "markers",
+        "no_auto_subscription: hospitals created in this test get no subscription row",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Subscriptions
+# ---------------------------------------------------------------------------
+# Tests build hospitals directly, in a dozen files, and almost none of them are
+# about subscriptions. So every hospital a test inserts gets the complimentary
+# Professional subscription a real one gets from the console; a test that is
+# about a hospital with no subscription opts out with `no_auto_subscription`.
+_auto_subscription = True
+
+# Orders snapshot the UPI ID they are paid to; a developer's .env may not set one.
+settings.UPI_VPA = settings.UPI_VPA or "nirogya.test@okaxis"
+
+
+def _grant_test_subscription(_mapper: object, connection: sa.Connection, target: Hospital) -> None:
+    if not _auto_subscription:
+        return
+    connection.execute(
+        sa.text(
+            """
+            INSERT INTO subscriptions (id, hospital_id, plan_code, status,
+                                       current_period_start, complimentary,
+                                       cancel_at_period_end, created_at, updated_at)
+            VALUES (gen_random_uuid(), :hospital_id, 'professional', 'ACTIVE',
+                    now(), true, false, now(), now())
+            """
+        ),
+        {"hospital_id": target.id},
+    )
+
+
+sa.event.listen(Hospital, "after_insert", _grant_test_subscription)
+
+
+@pytest.fixture(autouse=True)
+def auto_subscription(request: pytest.FixtureRequest) -> Iterator[None]:
+    global _auto_subscription
+    _auto_subscription = request.node.get_closest_marker("no_auto_subscription") is None
+    yield
+    _auto_subscription = True
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +194,11 @@ def database() -> Iterator[URL]:
                         f"IN SCHEMA public TO {role}"
                     )
                 )
+                # As `scripts/bootstrap_db_role.py` grants in a real deployment:
+                # receipt numbers come from a sequence the app must draw on.
+                await conn.execute(
+                    sa.text(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {role}")
+                )
         finally:
             await engine.dispose()
 
@@ -179,6 +230,24 @@ def restore_event_subscriptions() -> Iterator[None]:
     yield
     event_bus.clear()
     register_event_handlers()
+
+
+@pytest.fixture(autouse=True)
+async def reset_rate_limits() -> AsyncIterator[None]:
+    """Every test starts with an unspent rate-limit budget.
+
+    The limiter's counters live in the shared Redis and every test client
+    calls from the same address, so without this the eleventh signup across
+    the whole run would be refused, in whichever test happened to make it.
+    """
+    try:
+        client = get_redis()
+        keys = [key async for key in client.scan_iter(match="rl:*")]
+        if keys:
+            await client.delete(*keys)
+    except (redis.exceptions.RedisError, OSError):
+        pass  # No Redis: the limiter fails open, so there is nothing to reset.
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -230,7 +299,9 @@ async def clean_database(request: pytest.FixtureRequest) -> AsyncIterator[None]:
                     "insurance_claims, payments, charges, invoices, service_prices, "
                     "service_items, rate_cards, invoice_sequences, "
                     "encounter_events, vitals, clinical_notes, diagnoses, orders, "
-                    "note_templates, encounters, encounter_sequences, hospital_logos "
+                    "note_templates, encounters, encounter_sequences, hospital_logos, "
+                    "email_otps, signup_intents, contact_messages, payment_receipts, "
+                    "payment_proofs, payment_orders, subscription_reminders "
                     "RESTART IDENTITY CASCADE"
                 )
             )

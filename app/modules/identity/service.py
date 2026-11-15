@@ -30,6 +30,7 @@ from app.core.exceptions import (
 )
 from app.core.models import utc_now
 from app.core.pagination import PageParams
+from app.core.rbac_registry import platform_only_permissions
 from app.core.security import (
     DEVICE,
     TWO_FACTOR,
@@ -62,6 +63,8 @@ from app.modules.identity.schemas import (
     UserCreate,
     UserUpdate,
 )
+from app.modules.subscriptions import service as subscriptions_service
+from app.modules.subscriptions.entitlements import Entitlements
 from app.modules.tenancy import service as tenancy_service
 
 logger = logging.getLogger(__name__)
@@ -80,6 +83,9 @@ class AuthContext:
     user: User
     roles: frozenset[str]
     permissions: frozenset[str]
+    # What the caller's hospital may use. None for platform users, who are
+    # never gated, and for a hospital that has no subscription at all.
+    entitlements: Entitlements | None = None
 
     @property
     def hospital_id(self) -> uuid.UUID | None:
@@ -95,7 +101,15 @@ class AuthContext:
         return not self.roles.isdisjoint(PLATFORM_ROLES)
 
     def has_permission(self, *codes: str) -> bool:
-        return any(code in self.permissions for code in codes)
+        """Holds any of `codes`. A platform-only permission counts for platform
+        staff alone: a hospital account holding one (a custom role, a stray
+        row) gains nothing from it, because the routes behind those codes act
+        across every hospital (security review C1)."""
+        platform_only = platform_only_permissions()
+        return any(
+            code in self.permissions and (code not in platform_only or self.is_platform_user)
+            for code in codes
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +233,10 @@ async def resolve_permissions(
 
 async def build_auth_context(session: AsyncSession, user: User) -> AuthContext:
     roles, permissions = await resolve_permissions(session, user)
-    return AuthContext(user=user, roles=roles, permissions=permissions)
+    entitlements: Entitlements | None = None
+    if user.hospital_id is not None and roles.isdisjoint(PLATFORM_ROLES):
+        entitlements = await subscriptions_service.get_entitlements(session, user.hospital_id)
+    return AuthContext(user=user, roles=roles, permissions=permissions, entitlements=entitlements)
 
 
 def require_permission(context: AuthContext, *codes: str) -> None:
@@ -266,6 +283,22 @@ async def get_user_names(
         )
     ).all()
     return {row[0]: row[1] for row in rows}
+
+
+async def get_user_contacts(
+    session: AsyncSession, user_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, tuple[str, str]]:
+    """(name, email) for each user, across tenants: for the platform console,
+    whose payment queue lists people who belong to no hospital yet."""
+    if not user_ids:
+        return {}
+    async with system_context(session):
+        rows = (
+            await session.execute(
+                select(User.id, User.full_name, User.email).where(col(User.id).in_(set(user_ids)))
+            )
+        ).all()
+    return {row[0]: (row[1], row[2]) for row in rows}
 
 
 async def get_user_by_email(session: AsyncSession, email: str) -> User | None:
@@ -690,6 +723,14 @@ async def create_role(
     System roles are seeded by migration and are not creatable here — that is
     what keeps `PLATFORM_ADMIN` from being redefined by a tenant.
     """
+    refused = sorted(set(payload.permission_codes or ()) & platform_only_permissions())
+    if refused:
+        # A hospital's role may never carry the platform owner's powers.
+        raise PermissionDeniedError(
+            "A hospital role cannot include platform permissions.",
+            code="permission_not_grantable",
+            details={"codes": refused},
+        )
     existing = await get_role_by_code(session, payload.code, hospital_id=hospital_id)
     if existing is not None and existing.hospital_id == hospital_id:
         raise ConflictError(f"Role '{payload.code}' already exists.", code="role_code_taken")

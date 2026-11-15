@@ -19,7 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_session, set_bypass_rls, set_tenant_context
-from app.core.exceptions import AuthenticationError, PermissionDeniedError
+from app.core.exceptions import (
+    AuthenticationError,
+    PermissionDeniedError,
+    SubscriptionInactiveError,
+)
 from app.modules.identity.service import AuthContext, build_auth_context, user_from_access_token
 
 # auto_error=False so a missing header produces our own typed 401 with the
@@ -96,8 +100,34 @@ async def get_auth_context(
     elif context.hospital_id is not None:
         await set_tenant_context(session, context.hospital_id)
 
+    _refuse_lapsed_hospital(request, context)
+
     request.state.auth = context
     return context
+
+
+def _refuse_lapsed_hospital(request: Request, context: AuthContext) -> None:
+    """402 for a hospital whose subscription has ended, or that has none.
+
+    Checked here, once, rather than route by route: a new router is covered
+    the moment it exists. Sign-in, `/auth/me` and the subscription routes stay
+    reachable, because a locked-out hospital still has to see why and put it
+    right. Platform users belong to no hospital and are never gated.
+    """
+    if not settings.SUBSCRIPTIONS_ENFORCED:
+        return
+    if context.is_platform_user or context.hospital_id is None:
+        return
+    entitlements = context.entitlements
+    if entitlements is not None and entitlements.usable:
+        return
+    prefix = settings.API_V1_PREFIX
+    path = request.url.path
+    if path.startswith((f"{prefix}/auth/", f"{prefix}/subscriptions")):
+        return
+    raise SubscriptionInactiveError(
+        details={"status": entitlements.status.value if entitlements else "NONE"}
+    )
 
 
 CurrentUser = Annotated[AuthContext, Depends(get_auth_context)]

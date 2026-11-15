@@ -19,6 +19,7 @@ from app.modules.identity import service as identity_service
 from app.modules.identity.rbac import Permissions
 from app.modules.identity.service import AuthContext
 from app.modules.scheduling.rbac import SchedulingPermissions
+from app.modules.subscriptions import service as subscriptions_service
 from app.modules.tenancy import service
 from app.modules.tenancy.schemas import (
     DepartmentCreate,
@@ -61,6 +62,9 @@ async def create_hospital(
     context: CanCreate,
 ) -> HospitalRead:
     hospital = await service.create_hospital(session, payload)
+    # Set up by hand, so not paid for through signup: complimentary, like every
+    # hospital that existed before plans did.
+    await subscriptions_service.grant_complimentary(session, hospital.id)
     await identity_service.record_audit(
         session,
         action="hospital.create",

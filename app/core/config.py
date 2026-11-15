@@ -5,6 +5,7 @@ Every variable read here is documented in `.env.example`.
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
@@ -25,6 +26,9 @@ _LIBPQ_ONLY_PARAMS = frozenset(
 )
 
 # Hosts we will talk to without TLS (compose service names and loopback).
+# handle@psp, as NPCI issues them (same rule as a hospital's own UPI ID).
+_UPI_VPA_PATTERN = re.compile(r"^[a-z0-9._-]{2,256}@[a-z][a-z0-9]{1,63}$")
+
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "postgres", "db"})
 
 
@@ -247,6 +251,32 @@ class Settings(BaseSettings):
     APP_PUBLIC_URL: str = "http://localhost:3000"
     INVITE_TTL_HOURS: Annotated[int, Field(ge=1, le=336)] = 48
 
+    # --- Subscriptions -----------------------------------------------------
+    # Days a hospital keeps full access after its paid period ends unpaid.
+    GRACE_PERIOD_DAYS: Annotated[int, Field(ge=0, le=60)] = 7
+    # Refuse lapsed hospitals (402) and features outside the plan (403). An
+    # escape hatch for an incident, not a feature: leave it on.
+    SUBSCRIPTIONS_ENFORCED: bool = True
+
+    # --- Signup and UPI payments ---------------------------------------------
+    # Keys the hash of every emailed one-time code. Production refuses to start
+    # without one; elsewhere it falls back to a value derived from SECRET_KEY.
+    OTP_HMAC_SECRET: SecretStr = SecretStr("")
+    OTP_TTL_MINUTES: Annotated[int, Field(ge=1, le=60)] = 10
+    # The one UPI ID every subscription payment goes to, and the name a payer's
+    # UPI app shows for it. Production refuses to start without the ID.
+    UPI_VPA: str = ""
+    UPI_PAYEE_NAME: Annotated[str, Field(min_length=1, max_length=100)] = "Nirogya"
+    # An order nobody has paid against stops being payable after this.
+    PAYMENT_ORDER_TTL_HOURS: Annotated[int, Field(ge=1, le=168)] = 24
+    # What the payer is promised: a decision within this many hours.
+    PAYMENT_REVIEW_HOURS: Annotated[int, Field(ge=1, le=72)] = 12
+    # Where contact-form messages and "a payment is waiting" alerts go.
+    # Empty: PLATFORM_SUPPORT_CONTACT.
+    CONTACT_INBOX: str = ""
+    # The public marketing site. Its origin belongs in CORS_ORIGINS too.
+    WEBSITE_URL: str = "http://localhost:3100"
+
     # --- CORS --------------------------------------------------------------
     # `NoDecode` stops pydantic-settings from trying to JSON-parse the env
     # value: we want a plain comma-separated list in .env, not `["a","b"]`.
@@ -294,6 +324,14 @@ class Settings(BaseSettings):
             raise ValueError("NOTIFICATION_CHANNEL_PRIORITY must list at least one channel.")
         return normalised
 
+    @field_validator("UPI_VPA")
+    @classmethod
+    def _upi_vpa(cls, value: str) -> str:
+        vpa = value.strip().lower()
+        if vpa and not _UPI_VPA_PATTERN.match(vpa):
+            raise ValueError("UPI_VPA looks like name@bank, e.g. nirogya@okaxis.")
+        return vpa
+
     @field_validator("LOG_LEVEL")
     @classmethod
     def _upper(cls, value: str) -> str:
@@ -339,6 +377,20 @@ class Settings(BaseSettings):
             # real invitation would send a hospital administrator to localhost.
             raise ValueError("APP_PUBLIC_URL must be the public https:// address in production")
         return self
+
+    @model_validator(mode="after")
+    def _guard_payments(self) -> Settings:
+        """A payment page with no UPI ID, or codes hashed with a guessable
+        key, must stop the deploy rather than reach a paying hospital."""
+        if self.is_production and not self.UPI_VPA:
+            raise ValueError("UPI_VPA must be set in production")
+        if self.is_production and len(self.OTP_HMAC_SECRET.get_secret_value()) < 32:
+            raise ValueError("OTP_HMAC_SECRET must be at least 32 characters in production")
+        return self
+
+    @property
+    def contact_inbox(self) -> str:
+        return self.CONTACT_INBOX or self.PLATFORM_SUPPORT_CONTACT
 
     # --- Derived -----------------------------------------------------------
     @computed_field  # type: ignore[prop-decorator]

@@ -16,7 +16,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request, status
 
@@ -82,6 +82,8 @@ from app.modules.identity.service import AuthContext
 from app.modules.patients import service as patients_service
 from app.modules.patients.rbac import PatientPermissions
 from app.modules.patients.schemas import PatientRead
+from app.modules.subscriptions.deps import require_feature
+from app.modules.subscriptions.features import FeatureKey
 from app.modules.tenancy import service as tenancy_service
 
 rate_cards_router = APIRouter(prefix="/billing/rate-cards", tags=["billing"])
@@ -107,9 +109,7 @@ CanAddCharge = Annotated[AuthContext, Depends(require(BillingPermissions.CHARGE_
 CanDiscount = Annotated[AuthContext, Depends(require(BillingPermissions.CHARGE_DISCOUNT))]
 CanWaive = Annotated[AuthContext, Depends(require(BillingPermissions.CHARGE_WAIVE))]
 CanReadInvoice = Annotated[AuthContext, Depends(require(BillingPermissions.INVOICE_READ))]
-CanReadAllInvoices = Annotated[
-    AuthContext, Depends(require(BillingPermissions.INVOICE_READ_ALL))
-]
+CanReadAllInvoices = Annotated[AuthContext, Depends(require(BillingPermissions.INVOICE_READ_ALL))]
 CanReadPatientBills = Annotated[
     AuthContext, Depends(require(BillingPermissions.PATIENT_BILLS_READ))
 ]
@@ -122,9 +122,33 @@ CanRecordPayment = Annotated[AuthContext, Depends(require(BillingPermissions.PAY
 CanReversePayment = Annotated[AuthContext, Depends(require(BillingPermissions.PAYMENT_REVERSE))]
 CanReadClaim = Annotated[AuthContext, Depends(require(BillingPermissions.CLAIM_READ))]
 CanManageClaim = Annotated[AuthContext, Depends(require(BillingPermissions.CLAIM_MANAGE))]
-CanReadAccounts = Annotated[AuthContext, Depends(require(BillingPermissions.ACCOUNTS_READ))]
-CanEditIpdBill = Annotated[AuthContext, Depends(require(BillingPermissions.IPD_BILL_EDIT))]
-CanFinaliseIpdBill = Annotated[AuthContext, Depends(require(BillingPermissions.IPD_BILL_FINALISE))]
+
+
+def _accounts(permission: str) -> Any:
+    """A permission that also needs the `accounts` plan feature.
+
+    The accounts dashboard and the IPD bill editor are Professional; the
+    counter's board and the bill at the desk, on the same router, are OPD and
+    stay open. So the lock is on these three, not on the router.
+    """
+    permitted = require(permission)
+    in_plan = require_feature(FeatureKey.ACCOUNTS)
+
+    # Default-argument form on purpose: this module defers annotation
+    # evaluation, and an `Annotated[..., Depends(local)]` naming these two
+    # closures could not be resolved when FastAPI reads the signature.
+    async def dependency(
+        context: AuthContext = Depends(permitted),
+        _: AuthContext = Depends(in_plan),
+    ) -> AuthContext:
+        return context
+
+    return Depends(dependency)
+
+
+CanReadAccounts = Annotated[AuthContext, _accounts(BillingPermissions.ACCOUNTS_READ)]
+CanEditIpdBill = Annotated[AuthContext, _accounts(BillingPermissions.IPD_BILL_EDIT)]
+CanFinaliseIpdBill = Annotated[AuthContext, _accounts(BillingPermissions.IPD_BILL_FINALISE)]
 
 
 async def _require_ipd_power(

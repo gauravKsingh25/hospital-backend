@@ -594,6 +594,22 @@ async def _next_counter(
 # ---------------------------------------------------------------------------
 # Appointments
 # ---------------------------------------------------------------------------
+async def _require_own_patient(
+    session: AsyncSession, patient_id: uuid.UUID, *, hospital_id: uuid.UUID
+) -> None:
+    """The patient must be this hospital's. A foreign key is checked without
+    row-level security, so another hospital's patient id would otherwise be
+    stored on this hospital's appointment."""
+    from app.modules.patients import service as patients_service
+
+    try:
+        patient = await patients_service.get_patient(session, patient_id)
+    except NotFoundError:
+        patient = None
+    if patient is None or patient.hospital_id != hospital_id:
+        raise NotFoundError("Patient not found.", code="patient_not_found")
+
+
 async def book_appointment(
     session: AsyncSession,
     payload: AppointmentBook,
@@ -602,6 +618,7 @@ async def book_appointment(
     booked_by_id: uuid.UUID | None = None,
 ) -> Appointment:
     doctor = await get_doctor(session, payload.doctor_id, hospital_id=hospital_id)
+    await _require_own_patient(session, payload.patient_id, hospital_id=hospital_id)
     if not doctor.is_accepting_appointments:
         raise ConflictError(
             f"{doctor.display_name} is not accepting appointments.",

@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -33,13 +33,17 @@ from app.core.security_headers import SecurityHeadersMiddleware
 from app.modules.billing import router as billing_router
 from app.modules.clinical import router as clinical_router
 from app.modules.diagnostics import router as diagnostics_router
-from app.modules.identity import platform_router
+from app.modules.identity import platform_router, public_router
 from app.modules.identity import router as identity_router
 from app.modules.ipd import router as ipd_router
 from app.modules.notifications import router as notifications_router
 from app.modules.patients import router as patients_router
 from app.modules.reporting import router as reporting_router
 from app.modules.scheduling import router as scheduling_router
+from app.modules.subscriptions import platform_router as subscriptions_platform_router
+from app.modules.subscriptions import router as subscriptions_router
+from app.modules.subscriptions.deps import require_feature
+from app.modules.subscriptions.features import FeatureKey
 from app.modules.tenancy import router as tenancy_router
 
 # Imported for its side effects: it registers every module's tables AND every
@@ -136,11 +140,17 @@ async def health_ready() -> JSONResponse:
     )
 
 
+def _plan(feature: FeatureKey) -> list[Any]:
+    """Lock a whole router to a plan feature (see `subscriptions.features`)."""
+    return [Depends(require_feature(feature))]
+
+
 def _register_routers(app: FastAPI) -> None:
     app.include_router(health_router)
 
     prefix = settings.API_V1_PREFIX
     app.include_router(identity_router.auth_router, prefix=prefix)
+    app.include_router(public_router.public_router, prefix=prefix)
     app.include_router(identity_router.users_router, prefix=prefix)
     app.include_router(identity_router.roles_router, prefix=prefix)
     app.include_router(identity_router.audit_router, prefix=prefix)
@@ -156,10 +166,24 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(clinical_router.encounters_router, prefix=prefix)
     app.include_router(clinical_router.orders_router, prefix=prefix)
     app.include_router(clinical_router.templates_router, prefix=prefix)
-    app.include_router(diagnostics_router.catalogue_router, prefix=prefix)
-    app.include_router(diagnostics_router.specimens_router, prefix=prefix)
-    app.include_router(diagnostics_router.reports_router, prefix=prefix)
-    app.include_router(diagnostics_router.worklist_router, prefix=prefix)
+    app.include_router(
+        diagnostics_router.catalogue_router,
+        prefix=prefix,
+        dependencies=_plan(FeatureKey.DIAGNOSTICS),
+    )
+    app.include_router(
+        diagnostics_router.specimens_router,
+        prefix=prefix,
+        dependencies=_plan(FeatureKey.DIAGNOSTICS),
+    )
+    app.include_router(
+        diagnostics_router.reports_router, prefix=prefix, dependencies=_plan(FeatureKey.DIAGNOSTICS)
+    )
+    app.include_router(
+        diagnostics_router.worklist_router,
+        prefix=prefix,
+        dependencies=_plan(FeatureKey.DIAGNOSTICS),
+    )
     app.include_router(billing_router.rate_cards_router, prefix=prefix)
     app.include_router(billing_router.services_router, prefix=prefix)
     app.include_router(billing_router.charges_router, prefix=prefix)
@@ -167,21 +191,45 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(billing_router.billing_patients_router, prefix=prefix)
     app.include_router(billing_router.invoices_router, prefix=prefix)
     app.include_router(billing_router.payments_router, prefix=prefix)
-    app.include_router(billing_router.claims_router, prefix=prefix)
+    app.include_router(
+        billing_router.claims_router, prefix=prefix, dependencies=_plan(FeatureKey.ACCOUNTS)
+    )
     # Templates and suppressions are mounted before the outbox: both sit under
     # /notifications/..., and a bare `/notifications/{notification_id}` would
     # otherwise swallow `/notifications/templates` as a UUID path parameter.
-    app.include_router(notifications_router.templates_router, prefix=prefix)
-    app.include_router(notifications_router.suppressions_router, prefix=prefix)
-    app.include_router(notifications_router.notifications_router, prefix=prefix)
-    app.include_router(ipd_router.wards_router, prefix=prefix)
-    app.include_router(ipd_router.beds_router, prefix=prefix)
-    app.include_router(ipd_router.admissions_router, prefix=prefix)
-    app.include_router(ipd_router.chart_router, prefix=prefix)
-    app.include_router(ipd_router.summaries_router, prefix=prefix)
-    app.include_router(ipd_router.admission_requests_router, prefix=prefix)
-    app.include_router(ipd_router.medicines_router, prefix=prefix)
+    app.include_router(
+        notifications_router.templates_router,
+        prefix=prefix,
+        dependencies=_plan(FeatureKey.MESSAGING),
+    )
+    app.include_router(
+        notifications_router.suppressions_router,
+        prefix=prefix,
+        dependencies=_plan(FeatureKey.MESSAGING),
+    )
+    app.include_router(
+        notifications_router.notifications_router,
+        prefix=prefix,
+        dependencies=_plan(FeatureKey.MESSAGING),
+    )
+    app.include_router(ipd_router.wards_router, prefix=prefix, dependencies=_plan(FeatureKey.IPD))
+    app.include_router(ipd_router.beds_router, prefix=prefix, dependencies=_plan(FeatureKey.IPD))
+    app.include_router(
+        ipd_router.admissions_router, prefix=prefix, dependencies=_plan(FeatureKey.IPD)
+    )
+    app.include_router(ipd_router.chart_router, prefix=prefix, dependencies=_plan(FeatureKey.IPD))
+    app.include_router(
+        ipd_router.summaries_router, prefix=prefix, dependencies=_plan(FeatureKey.IPD)
+    )
+    app.include_router(
+        ipd_router.admission_requests_router, prefix=prefix, dependencies=_plan(FeatureKey.IPD)
+    )
+    app.include_router(
+        ipd_router.medicines_router, prefix=prefix, dependencies=_plan(FeatureKey.MEDICINES)
+    )
     app.include_router(reporting_router.router, prefix=prefix)
+    app.include_router(subscriptions_router.router, prefix=prefix)
+    app.include_router(subscriptions_platform_router.payments_router, prefix=prefix)
 
 
 def create_app() -> FastAPI:

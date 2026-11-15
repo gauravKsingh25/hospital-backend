@@ -53,6 +53,7 @@ from app.modules.identity.schemas import (
 )
 from app.modules.identity.service import AuthContext
 from app.modules.reporting import service as reporting_service
+from app.modules.subscriptions import service as subscriptions_service
 from app.modules.tenancy import service as tenancy_service
 from app.modules.tenancy.schemas import HospitalRead
 
@@ -309,6 +310,9 @@ async def get_overview(session: SessionDep, context: CanUseConsole) -> PlatformO
         pending_invites=summary.pending_invites,
         staff_accounts=summary.staff_accounts,
         emails_failed_7d=summary.emails_failed_7d,
+        payments_awaiting_review=await subscriptions_service.count_payments_awaiting_review(
+            session
+        ),
         attention=[AttentionItemRead.model_validate(asdict(item)) for item in summary.attention],
         recent_activity=[AuditLogRead.model_validate(row) for row in summary.recent_activity],
     )
@@ -362,6 +366,9 @@ async def create_hospital_with_admin(
     # One transaction for both: if the invite is refused (the address already
     # has an account), the hospital is not left behind half-onboarded.
     hospital = await tenancy_service.create_hospital(session, payload.hospital)
+    # Set up by hand, so not paid for through signup: complimentary, like every
+    # hospital that existed before plans did.
+    await subscriptions_service.grant_complimentary(session, hospital.id)
     await service.record_audit(
         session,
         action="hospital.create",

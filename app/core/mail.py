@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ConsoleMailer",
+    "MailAttachment",
     "MailMessage",
     "MailResult",
     "Mailer",
@@ -49,11 +50,19 @@ _MAX_ERROR_LENGTH = 500
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class MailAttachment:
+    filename: str
+    content_type: str
+    data: bytes
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class MailMessage:
     to: str
     subject: str
     text: str
     html: str | None = None
+    attachments: tuple[MailAttachment, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -77,6 +86,11 @@ def _build(message: MailMessage) -> EmailMessage:
     email.set_content(message.text)
     if message.html is not None:
         email.add_alternative(message.html, subtype="html")
+    for attachment in message.attachments:
+        maintype, _, subtype = attachment.content_type.partition("/")
+        email.add_attachment(
+            attachment.data, maintype=maintype, subtype=subtype, filename=attachment.filename
+        )
     return email
 
 

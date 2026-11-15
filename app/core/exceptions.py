@@ -38,6 +38,9 @@ class DomainError(Exception):
         self.details = details or {}
         super().__init__(self.message)
 
+    # Extra response headers, for the few errors whose HTTP meaning needs one.
+    headers: dict[str, str] | None = None
+
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"error": {"code": self.code, "message": self.message}}
         if self.details:
@@ -79,6 +82,26 @@ class PermissionDeniedError(DomainError):
     message = "You do not have permission to perform this action."
 
 
+class SubscriptionInactiveError(DomainError):
+    """The hospital's subscription has lapsed, or it has none.
+
+    402 rather than 403: nothing is wrong with the caller's role, and the
+    client needs to tell "you may not" from "the hospital has not paid".
+    """
+
+    status_code = status.HTTP_402_PAYMENT_REQUIRED
+    code = "subscription_inactive"
+    message = "This hospital's subscription has ended."
+
+
+class FeatureNotInPlanError(DomainError):
+    """The hospital's plan does not include the feature asked for."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    code = "feature_not_in_plan"
+    message = "This feature is not included in your plan."
+
+
 class TenantIsolationError(DomainError):
     """A request touched data belonging to another hospital.
 
@@ -99,6 +122,24 @@ class IllegalStateTransitionError(DomainError):
     message = "That status change is not allowed from the current state."
 
 
+class RateLimitedError(DomainError):
+    """Too many requests from one client to a public route."""
+
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    code = "rate_limited"
+    message = "Too many attempts. Please wait a little and try again."
+
+    def __init__(self, *, retry_after_seconds: int) -> None:
+        super().__init__(details={"retry_after": retry_after_seconds})
+        self.headers = {"Retry-After": str(retry_after_seconds)}
+
+
+class PayloadTooLargeError(DomainError):
+    status_code = status.HTTP_413_CONTENT_TOO_LARGE
+    code = "payload_too_large"
+    message = "That file is too large."
+
+
 class ServiceUnavailableError(DomainError):
     status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     code = "service_unavailable"
@@ -112,7 +153,9 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def _domain_error_handler(_: Request, exc: DomainError) -> JSONResponse:
         # Expected failures: logged at INFO, not as errors — they are not bugs.
         logger.info("domain error code=%s message=%s", exc.code, exc.message)
-        return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
+        return JSONResponse(
+            status_code=exc.status_code, content=exc.to_payload(), headers=exc.headers
+        )
 
     @app.exception_handler(RequestValidationError)
     async def _request_validation_handler(_: Request, exc: RequestValidationError) -> JSONResponse:

@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.modules.identity.models import InviteStatus, PlatformEmailKind, PlatformEmailStatus
+from app.modules.subscriptions.schemas import EntitlementsRead
 from app.modules.tenancy.schemas import HospitalCreate, HospitalRead
 
 __all__ = [
@@ -203,6 +204,9 @@ class CurrentUserRead(UserRead):
     permissions: list[str]
     # SEC-05: the person's role makes two-step sign-in compulsory.
     two_factor_required: bool = False
+    # The hospital's plan and what it unlocks. Null for platform users, who
+    # belong to no hospital, and for a hospital with no subscription.
+    entitlements: EntitlementsRead | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +413,8 @@ class PlatformOverviewRead(BaseModel):
     pending_invites: int
     staff_accounts: int
     emails_failed_7d: int
+    # Signup payments with a UTR in, waiting for the owner's check.
+    payments_awaiting_review: int
     attention: list[AttentionItemRead]
     recent_activity: list[AuditLogRead]
 

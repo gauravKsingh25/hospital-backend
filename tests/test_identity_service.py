@@ -379,6 +379,8 @@ class TestRoleAssignment:
             Permissions.PLATFORM_INVITE_READ,
             Permissions.PLATFORM_INVITE_RESEND,
             Permissions.PLATFORM_AUDIT_READ,
+            # Support may look at the payment queue; only the owner decides.
+            "platform:payment_read",
         }
         assert context.is_platform_user is True
         assert context.is_platform_admin is False

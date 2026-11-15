@@ -122,6 +122,8 @@ from app.modules.notifications.schemas import (
 )
 from app.modules.patients import service as patients_service
 from app.modules.patients.models import Patient
+from app.modules.subscriptions import service as subscriptions_service
+from app.modules.subscriptions.features import FeatureKey
 from app.modules.tenancy import service as tenancy_service
 
 logger = logging.getLogger(__name__)
@@ -572,6 +574,14 @@ async def _blocking_reason(
             return SuppressionReason.DECEASED
         if _matches(suppression, channel=channel, category=category):
             return suppression.reason
+
+    # Last, so a death or an opt-out is still the recorded reason: the plan.
+    # Checked here, at both layers, because a reminder queued on Professional
+    # must not go out after the hospital has moved to a plan without messaging.
+    if not await subscriptions_service.hospital_has_feature(
+        session, hospital_id, FeatureKey.MESSAGING
+    ):
+        return SuppressionReason.NOT_IN_PLAN
     return None
 
 
@@ -592,6 +602,7 @@ async def suppress(
         SuppressionReason.DECEASED,
         SuppressionReason.DISABLED,
         SuppressionReason.UNIDENTIFIED,
+        SuppressionReason.NOT_IN_PLAN,
     ):
         raise ValidationError(
             "That reason is not recorded by hand.",
@@ -1352,6 +1363,10 @@ async def send_adhoc(
         if user.hospital_id is not None and user.hospital_id != hospital_id:
             raise NotFoundError("User not found.", code="user_not_found")
         recipient = _staff_recipient(user)
+
+    if payload.encounter_id is not None:
+        # The visit must be this hospital's (foreign keys ignore row-level security).
+        await clinical_service.get_encounter(session, payload.encounter_id, hospital_id=hospital_id)
 
     return await notify(
         session,

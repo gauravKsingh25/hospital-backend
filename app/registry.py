@@ -29,6 +29,7 @@ from app.modules.notifications.handlers import (
 from app.modules.patients import models as patients_models  # noqa: F401
 from app.modules.scheduling import models as scheduling_models  # noqa: F401
 from app.modules.scheduling.handlers import register_handlers as _register_scheduling_handlers
+from app.modules.subscriptions import models as subscriptions_models  # noqa: F401
 from app.modules.tenancy import models as tenancy_models  # noqa: F401
 
 # `reporting` is deliberately absent: it owns no tables, only SQL views defined

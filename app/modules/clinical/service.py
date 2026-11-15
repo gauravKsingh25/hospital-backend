@@ -87,6 +87,9 @@ from app.modules.identity import service as identity_service
 from app.modules.identity.models import User
 from app.modules.identity.rbac import Roles
 from app.modules.patients import service as patients_service
+from app.modules.subscriptions import service as subscriptions_service
+from app.modules.subscriptions.features import FeatureKey
+from app.modules.tenancy import service as tenancy_service
 
 if TYPE_CHECKING:
     # For an annotation only: patient rows are fetched through `patients_service`.
@@ -735,6 +738,7 @@ async def admit(
     department_id: uuid.UUID | None = None,
 ) -> Encounter:
     """Convert the visit to an inpatient stay. `ipd` takes it from here."""
+    await subscriptions_service.ensure_feature(session, encounter.hospital_id, FeatureKey.IPD)
     if department_id is not None:
         encounter.department_id = department_id
         session.add(encounter)
@@ -1082,6 +1086,14 @@ async def place_order(
             "This visit is closed; orders cannot be added.",
             code="encounter_closed",
             details={"status": encounter.status.value},
+        )
+
+    # A test nobody at this hospital could run or report. Refused here, not
+    # only on the lab's own routes: the order is placed from the consultation
+    # screen, which every plan has.
+    if payload.order_type in (OrderType.LAB, OrderType.RADIOLOGY):
+        await subscriptions_service.ensure_feature(
+            session, encounter.hospital_id, FeatureKey.DIAGNOSTICS
         )
 
     fields = payload.model_dump()
@@ -1539,6 +1551,12 @@ async def create_template(
     hospital_id: uuid.UUID,
     actor: User,
 ) -> NoteTemplate:
+    if payload.department_id is not None:
+        # A foreign key is checked without row-level security: another
+        # hospital's department must not be storable here.
+        await tenancy_service.get_department(
+            session, payload.department_id, hospital_id=hospital_id
+        )
     template = NoteTemplate(
         hospital_id=hospital_id,
         # NULL owner = hospital-wide. A doctor's own shortcuts stay theirs.

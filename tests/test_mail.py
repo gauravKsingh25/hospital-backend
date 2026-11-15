@@ -142,3 +142,26 @@ def test_production_refuses_a_localhost_link_base() -> None:
             SMTP_USERNAME="owner@gmail.com",
             SMTP_PASSWORD="app-pass-123",
         )
+
+
+async def test_console_mailer_writes_attachments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.core.mail import MailAttachment
+
+    monkeypatch.setattr(settings, "MAIL_OUTBOX_DIR", str(tmp_path))
+    await ConsoleMailer().send(
+        MailMessage(
+            to="a@b.in",
+            subject="Receipt",
+            text="Attached.",
+            attachments=(
+                MailAttachment(
+                    filename="NIR-2026-000001.pdf", content_type="application/pdf", data=b"%PDF-1.7"
+                ),
+            ),
+        )
+    )
+    [content] = _outbox(tmp_path)
+    assert 'filename="NIR-2026-000001.pdf"' in content
+    assert "Content-Type: application/pdf" in content

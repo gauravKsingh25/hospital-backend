@@ -25,11 +25,13 @@ import asyncio
 import os
 import sys
 import uuid
+from datetime import timedelta
 from decimal import Decimal
 
 from app.core.config import settings
 from app.core.database import dispose_engine, session_scope, system_context
 from app.core.exceptions import DomainError
+from app.core.models import utc_now
 from app.core.pagination import MAX_PAGE_SIZE, PageParams
 from app.modules.billing import service as billing_service
 from app.modules.billing.schemas import RateCardCreate, ServiceItemCreate, ServicePriceUpsert
@@ -43,6 +45,8 @@ from app.modules.ipd.models import DrugSchedule, MedicationRoute, MedicineForm
 from app.modules.ipd.schemas import BedCreate, MedicineItemCreate, WardCreate
 from app.modules.scheduling import service as scheduling_service
 from app.modules.scheduling.schemas import DoctorCreate
+from app.modules.subscriptions import service as subscriptions_service
+from app.modules.subscriptions.features import PLAN_PROFESSIONAL, PLAN_STANDARD
 from app.modules.tenancy import service as tenancy_service
 from app.modules.tenancy.schemas import HospitalCreate, HospitalUpdate
 
@@ -60,6 +64,29 @@ STAFF = [
     ("admission@demo.hospital", "Ritu Sharma", Roles.ADMISSION_DESK),
     ("accountant@demo.hospital", "Anil Kapoor", Roles.ACCOUNTANT),
 ]
+
+# A second, smaller tenant on the Standard plan (OPD only), so plan gating has
+# something to be seen and tested against: its sidebar has no wards, lab,
+# medicines or messages, and those screens show the upgrade panel.
+OPD_CLINIC = ("DOPD", "Demo OPD Clinic")
+OPD_STAFF = [
+    ("opd-admin@demo.hospital", "Kavita Iyer", Roles.HOSPITAL_ADMIN),
+    ("opd-reception@demo.hospital", "Sunil Verma", Roles.RECEPTIONIST),
+    ("opd-doctor@demo.hospital", "Dr Neha Gupta", Roles.DOCTOR),
+]
+# How far ahead the clinic's paid month runs, renewed on every seed so the
+# demo never drifts into grace on its own.
+OPD_PAID_DAYS = 20
+
+# A third tenant whose paid month ended a month ago, reset on every seed: the
+# "subscription ended" screens and the renewal panel always have something to
+# show, and the lifecycle e2e spec can be re-run.
+LAPSED_CLINIC = ("DLPS", "Demo Lapsed Clinic")
+LAPSED_STAFF = [
+    ("lapsed-admin@demo.hospital", "Rohan Das", Roles.HOSPITAL_ADMIN),
+    ("lapsed-reception@demo.hospital", "Pooja Nair", Roles.RECEPTIONIST),
+]
+LAPSED_PAID_DAYS = -30
 
 # The platform owner: belongs to no hospital, lands on the platform console.
 PLATFORM_OWNER = ("platform@demo.hospital", "Gaurav Singh")
@@ -182,7 +209,19 @@ MEDICINES: list[
 ]
 
 
-async def seed(*, code: str, name: str, password: str) -> int:
+async def seed(
+    *,
+    code: str,
+    name: str,
+    password: str,
+    staff: list[tuple[str, str, str]] | None = None,
+    plan: str = PLAN_PROFESSIONAL,
+    paid_days: int = OPD_PAID_DAYS,
+) -> int:
+    """Seed one hospital. `plan` decides what it can use: the Standard clinic
+    gets no lab catalogue, ward or medicine list, because it could not open
+    them."""
+    staff = STAFF if staff is None else staff
     # Every account here shares a password printed in the README, one of them a
     # cross-tenant platform owner. On production that is a public master key.
     if settings.is_production:
@@ -206,11 +245,25 @@ async def seed(*, code: str, name: str, password: str) -> int:
             )
         hospital_id: uuid.UUID = hospital.id
 
+        if plan == PLAN_PROFESSIONAL:
+            await subscriptions_service.grant_complimentary(session, hospital_id)
+        else:
+            subscription = await subscriptions_service.grant_complimentary(
+                session, hospital_id, plan_code=plan
+            )
+            subscription.plan_code = plan
+            subscription.complimentary = False
+            subscription.current_period_start = utc_now() + timedelta(days=paid_days - 30)
+            subscription.current_period_end = utc_now() + timedelta(days=paid_days)
+            subscription.cancel_at_period_end = False
+            subscription.pending_plan_code = None
+            await subscriptions_service.write_subscription(session, subscription)
+
     created: list[tuple[str, str]] = []
     doctor_user_id: uuid.UUID | None = None
     doctor_name = ""
 
-    for email, full_name, role in STAFF:
+    for email, full_name, role in staff:
         async with session_scope() as session, system_context(session):
             user = await identity_service.get_user_by_email(session, email)
             if user is None:
@@ -279,14 +332,15 @@ async def seed(*, code: str, name: str, password: str) -> int:
                 print(f"Created doctor profile {doctor.display_name}.")
 
     await _seed_price_list(hospital_id)
-    await _seed_catalogue(hospital_id)
-    await _seed_ward(hospital_id)
-    await _seed_medicines(hospital_id)
+    if plan == PLAN_PROFESSIONAL:
+        await _seed_catalogue(hospital_id)
+        await _seed_ward(hospital_id)
+        await _seed_medicines(hospital_id)
 
     print()
-    print(f"Hospital: {name} ({code})")
+    print(f"Hospital: {name} ({code}), {plan} plan")
     print(f"Password for every account below: {password}")
-    for email, _, role in STAFF:
+    for email, _, role in staff:
         marker = "new" if any(email == made for made, _ in created) else "existing"
         print(f"  {role:<16} {email:<26} ({marker})")
 
@@ -474,7 +528,27 @@ def main() -> int:
 
     async def run() -> int:
         try:
-            return await seed(code=args.hospital_code, name=args.hospital_name, password=password)
+            result = await seed(code=args.hospital_code, name=args.hospital_name, password=password)
+            if result == 0:
+                clinic_code, clinic_name = OPD_CLINIC
+                result = await seed(
+                    code=clinic_code,
+                    name=clinic_name,
+                    password=password,
+                    staff=OPD_STAFF,
+                    plan=PLAN_STANDARD,
+                )
+            if result == 0:
+                lapsed_code, lapsed_name = LAPSED_CLINIC
+                result = await seed(
+                    code=lapsed_code,
+                    name=lapsed_name,
+                    password=password,
+                    staff=LAPSED_STAFF,
+                    plan=PLAN_STANDARD,
+                    paid_days=LAPSED_PAID_DAYS,
+                )
+            return result
         except DomainError as exc:
             print(f"{exc.code}: {exc.message}")
             return 1

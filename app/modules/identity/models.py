@@ -26,8 +26,11 @@ from app.core.models import IdentifiedModel, SoftDeleteMixin, UUIDMixin, utc_now
 
 __all__ = [
     "AuditLog",
+    "ContactMessage",
+    "EmailOtp",
     "Invite",
     "InviteStatus",
+    "OtpPurpose",
     "Permission",
     "PlatformEmail",
     "PlatformEmailKind",
@@ -35,6 +38,8 @@ __all__ = [
     "RefreshToken",
     "Role",
     "RolePermission",
+    "SignupIntent",
+    "SignupIntentStatus",
     "User",
     "UserRole",
 ]
@@ -414,6 +419,19 @@ class Invite(IdentifiedModel, table=True):
 class PlatformEmailKind(enum.StrEnum):
     INVITE = "INVITE"
     INVITE_RESEND = "INVITE_RESEND"
+    # Self-service signup and UPI payments.
+    OTP = "OTP"
+    SIGNUP_EXISTS = "SIGNUP_EXISTS"
+    PASSWORD_RESET = "PASSWORD_RESET"  # noqa: S105 - an email kind, not a secret
+    PAYMENT_SUBMITTED = "PAYMENT_SUBMITTED"
+    PAYMENT_ALERT = "PAYMENT_ALERT"
+    PAYMENT_APPROVED = "PAYMENT_APPROVED"
+    PAYMENT_REJECTED = "PAYMENT_REJECTED"
+    CONTACT_ALERT = "CONTACT_ALERT"
+    # The subscription lifecycle.
+    SUBSCRIPTION_REMINDER = "SUBSCRIPTION_REMINDER"
+    SUBSCRIPTION_GRACE = "SUBSCRIPTION_GRACE"
+    SUBSCRIPTION_EXPIRED = "SUBSCRIPTION_EXPIRED"
 
 
 class PlatformEmailStatus(enum.StrEnum):
@@ -465,3 +483,82 @@ class PlatformEmail(UUIDMixin, table=True):
         sa_type=DateTime(timezone=True),  # type: ignore[call-overload]
         sa_column_kwargs={"server_default": func.now()},
     )
+
+
+# ---------------------------------------------------------------------------
+# Self-service signup (spec §5/§6). Platform tables: no tenant policy — a
+# person signing up belongs to no hospital yet.
+# ---------------------------------------------------------------------------
+class OtpPurpose(enum.StrEnum):
+    SIGNUP = "SIGNUP"
+    RESET = "RESET"
+
+
+class EmailOtp(IdentifiedModel, table=True):
+    """A six-digit code sent by email. Only its keyed hash is stored."""
+
+    __tablename__ = "email_otps"
+    __table_args__ = (
+        Index("ix_email_otps_email_purpose_created", "email", "purpose", "created_at"),
+    )
+
+    email: str = Field(max_length=255, index=True)
+    purpose: OtpPurpose
+    code_hash: str = Field(max_length=64)
+    expires_at: datetime = Field(sa_type=DateTime(timezone=True))  # type: ignore[call-overload]
+    attempts: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
+    consumed_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),  # type: ignore[call-overload]
+    )
+    created_ip: str | None = Field(default=None, max_length=45)
+
+
+class SignupIntentStatus(enum.StrEnum):
+    STARTED = "STARTED"
+    VERIFIED = "VERIFIED"
+    COMPLETED = "COMPLETED"
+    EXPIRED = "EXPIRED"
+
+
+class SignupIntent(IdentifiedModel, table=True):
+    """What a visitor told us at signup, until their account exists.
+
+    Keeps the hospital name and chosen plan for the payment order, which is
+    raised after the account is created; and, for two minutes after that, the
+    hash of the one-time code that hands the new session to the app.
+    """
+
+    __tablename__ = "signup_intents"
+
+    email: str = Field(max_length=255, index=True)
+    full_name: str = Field(max_length=200)
+    hospital_name: str = Field(max_length=200)
+    plan_code: str = Field(foreign_key="plans.code", ondelete="RESTRICT", max_length=32)
+    phone: str | None = Field(default=None, max_length=20)
+    status: SignupIntentStatus = Field(default=SignupIntentStatus.STARTED, index=True)
+    verified_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),  # type: ignore[call-overload]
+    )
+    user_id: uuid.UUID | None = Field(
+        default=None, foreign_key="users.id", ondelete="SET NULL", nullable=True, index=True
+    )
+    handoff_code_hash: str | None = Field(default=None, max_length=64, unique=True)
+    handoff_expires_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),  # type: ignore[call-overload]
+    )
+
+
+class ContactMessage(IdentifiedModel, table=True):
+    """A message from the website's contact form."""
+
+    __tablename__ = "contact_messages"
+
+    name: str = Field(max_length=200)
+    email: str = Field(max_length=255, index=True)
+    phone: str | None = Field(default=None, max_length=20)
+    hospital_name: str | None = Field(default=None, max_length=200)
+    message: str = Field(max_length=4000)
+    created_ip: str | None = Field(default=None, max_length=45)

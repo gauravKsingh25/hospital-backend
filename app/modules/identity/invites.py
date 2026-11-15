@@ -30,8 +30,8 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import ColumnElement, func, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col, select
-from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.config import settings
 from app.core.database import system_context
@@ -107,7 +107,7 @@ async def get_invite(session: AsyncSession, invite_id: uuid.UUID, *, lock: bool 
     statement = select(Invite).where(Invite.id == invite_id)
     if lock:
         statement = statement.with_for_update().execution_options(populate_existing=True)
-    invite = (await session.execute(statement)).scalars().first()
+    invite: Invite | None = (await session.execute(statement)).scalars().first()
     if invite is None:
         raise NotFoundError("Invite not found.", code="invite_not_found")
     return invite
@@ -119,7 +119,7 @@ async def _by_token(session: AsyncSession, raw_token: str, *, lock: bool = False
         # Two tabs submitting the same link: the second waits here, then sees
         # ACCEPTED and is refused — never a second account.
         statement = statement.with_for_update()
-    invite = (await session.execute(statement)).scalars().first()
+    invite: Invite | None = (await session.execute(statement)).scalars().first()
     if invite is None:
         raise NotFoundError("This invite link is not valid.", code="invite_invalid")
     return invite

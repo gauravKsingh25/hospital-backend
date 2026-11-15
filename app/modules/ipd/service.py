@@ -131,6 +131,8 @@ from app.modules.ipd.transitions import assert_admission_transition, assert_bed_
 from app.modules.patients import service as patients_service
 from app.modules.patients.models import Patient, PatientAlert
 from app.modules.scheduling import service as scheduling_service
+from app.modules.subscriptions import service as subscriptions_service
+from app.modules.subscriptions.features import FeatureKey
 from app.modules.tenancy import service as tenancy_service
 
 logger = logging.getLogger(__name__)
@@ -264,12 +266,30 @@ async def _next_admission_number(session: AsyncSession, hospital_id: uuid.UUID) 
 # ---------------------------------------------------------------------------
 # Wards
 # ---------------------------------------------------------------------------
+async def _require_own_staffing(
+    session: AsyncSession,
+    *,
+    hospital_id: uuid.UUID,
+    doctor_id: uuid.UUID | None = None,
+    department_id: uuid.UUID | None = None,
+) -> None:
+    """A doctor or department named in a request must be this hospital's: a
+    foreign key is checked without row-level security."""
+    if doctor_id is not None:
+        await scheduling_service.get_doctor(session, doctor_id, hospital_id=hospital_id)
+    if department_id is not None:
+        await tenancy_service.get_department(session, department_id, hospital_id=hospital_id)
+
+
 async def create_ward(
     session: AsyncSession, payload: WardCreate, *, hospital_id: uuid.UUID
 ) -> Ward:
     code = payload.code.strip().upper()
     if await _ward_by_code(session, hospital_id=hospital_id, code=code) is not None:
         raise ConflictError(f"Ward {code} already exists.", code="ward_exists")
+    await _require_own_staffing(
+        session, hospital_id=hospital_id, department_id=payload.department_id
+    )
 
     ward = Ward(
         hospital_id=hospital_id,
@@ -872,6 +892,12 @@ async def admit_patient(
             code="patient_deceased",
         )
 
+    await _require_own_staffing(
+        session,
+        hospital_id=hospital_id,
+        doctor_id=payload.attending_doctor_id,
+        department_id=payload.department_id,
+    )
     bed = await get_bed(session, payload.bed_id, hospital_id=hospital_id)
     ward = await get_ward(session, bed.ward_id, hospital_id=hospital_id)
     _assert_ward_accepts(ward, patient.gender.value if patient.gender else None)
@@ -1007,6 +1033,9 @@ async def request_admission(
     death, referral or LAMA, a patient already in a bed, a patient already
     waiting at the desk. Everything else is the desk's call to make.
     """
+    # Reached from reception's emergency screen as well as the ward's own
+    # routes, so the plan is checked here rather than only at the router.
+    await subscriptions_service.ensure_feature(session, hospital_id, FeatureKey.IPD)
     encounter = await clinical_service.get_encounter(session, encounter_id, hospital_id=hospital_id)
     if encounter.status is EncounterStatus.ADMITTED:
         raise ConflictError("This visit is already an admission.", code="already_admitted")
@@ -1215,6 +1244,12 @@ async def admit_from_request(
     _assert_pending(request)
     encounter = await clinical_service.get_encounter(
         session, request.encounter_id, hospital_id=request.hospital_id
+    )
+    await _require_own_staffing(
+        session,
+        hospital_id=request.hospital_id,
+        doctor_id=payload.attending_doctor_id,
+        department_id=payload.department_id,
     )
     attending = payload.attending_doctor_id or request.doctor_id
     department = payload.department_id or request.department_id

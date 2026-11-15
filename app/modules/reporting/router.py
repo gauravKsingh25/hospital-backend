@@ -26,7 +26,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import ValidationError as PydanticValidationError
 
 from app.core.deps import SessionDep, TenantId, require
-from app.core.exceptions import ValidationError
+from app.core.exceptions import FeatureNotInPlanError, ValidationError
 from app.modules.identity.service import AuthContext
 from app.modules.reporting import service
 from app.modules.reporting.rbac import ReportingPermissions
@@ -40,6 +40,8 @@ from app.modules.reporting.schemas import (
     QueueSnapshot,
     RevenueReport,
 )
+from app.modules.subscriptions.deps import check_feature, require_feature
+from app.modules.subscriptions.features import FeatureKey
 
 router = APIRouter(prefix="/reports", tags=["reporting"])
 
@@ -47,10 +49,26 @@ CanReadOperational = Annotated[AuthContext, Depends(require(ReportingPermissions
 CanReadClinical = Annotated[AuthContext, Depends(require(ReportingPermissions.CLINICAL))]
 CanReadRevenue = Annotated[AuthContext, Depends(require(ReportingPermissions.REVENUE))]
 
+# Period reports are Professional. A plan without them still gets the
+# dashboard, the live queue, and footfall and revenue for today (`_window`).
+_FULL = [Depends(require_feature(FeatureKey.REPORTS_FULL))]
+
 # Default trailing window when the caller does not name one. Thirty days is the
 # span a monthly review actually looks at, and it keeps the default request off
 # a scan of the whole table.
 DEFAULT_TRAILING_DAYS = 30
+
+
+def _has_feature(context: AuthContext, feature: FeatureKey) -> bool:
+    try:
+        check_feature(context, feature)
+    except FeatureNotInPlanError:
+        return False
+    return True
+
+
+def _has_full_reports(context: AuthContext) -> bool:
+    return _has_feature(context, FeatureKey.REPORTS_FULL)
 
 
 async def _window(
@@ -58,14 +76,25 @@ async def _window(
     hospital_id: uuid.UUID,
     date_from: date | None,
     date_to: date | None,
+    *,
+    context: AuthContext | None = None,
 ) -> DateWindow:
     """Resolve the requested range, defaulting to the trailing month.
+
+    Pass `context` for a report that a plan without `reports_full` may see for
+    today only: such a hospital gets today when it names no range, and is
+    refused any other.
 
     "Today" is the *hospital's* today, not the server's — see
     `service.local_today`. A dashboard that rolls over at 05:30 IST because the
     server is on UTC is a dashboard staff learn to distrust.
     """
     today = await service.local_today(session, hospital_id)
+    if context is not None and not _has_full_reports(context):
+        if date_from is None and date_to is None:
+            date_from = date_to = today
+        elif not (date_from == date_to == today):
+            check_feature(context, FeatureKey.REPORTS_FULL)
     end = date_to or today
     start = date_from or (end - timedelta(days=DEFAULT_TRAILING_DAYS - 1))
     try:
@@ -86,15 +115,35 @@ async def dashboard(
     session: SessionDep,
     context: CanReadOperational,
     tenant_id: TenantId,
-    trailing_days: Annotated[int, Query(ge=1, le=90)] = DEFAULT_TRAILING_DAYS,
+    trailing_days: Annotated[int | None, Query(ge=1, le=90)] = None,
 ) -> Dashboard:
-    """Everything this user is allowed to see, in one round trip (CLAUDE.md §7b)."""
-    return await service.build_dashboard(
+    """Everything this user is allowed to see, in one round trip (CLAUDE.md §7b).
+
+    A plan without period reports gets today: that is its default, and asking
+    for a longer window is refused rather than quietly shortened, so a number
+    is never mislabelled as a month's.
+    """
+    if _has_full_reports(context):
+        trailing_days = trailing_days or DEFAULT_TRAILING_DAYS
+    elif trailing_days in (None, 1):
+        trailing_days = 1
+    else:
+        check_feature(context, FeatureKey.REPORTS_FULL)
+    result = await service.build_dashboard(
         session,
         hospital_id=tenant_id,
         permissions=set(context.permissions),
-        trailing_days=trailing_days,
+        trailing_days=trailing_days or 1,
     )
+    # The dashboard is open to every plan, so it must not be a way round the
+    # reports that are not: each section a locked route would refuse is left
+    # out here too. (After a downgrade these would be real numbers, not zeroes.)
+    withheld: dict[str, None] = {}
+    if not _has_feature(context, FeatureKey.IPD):
+        withheld.update(occupancy=None, inpatient=None)
+    if not _has_full_reports(context):
+        withheld.update(occupancy=None, inpatient=None, follow_up=None)
+    return result.model_copy(update=withheld) if withheld else result
 
 
 @router.get("/footfall", response_model=FootfallReport, summary="Patient volumes")
@@ -107,11 +156,16 @@ async def footfall(
     department_id: uuid.UUID | None = None,
     doctor_id: uuid.UUID | None = None,
 ) -> FootfallReport:
-    window = await _window(session, tenant_id, date_from, date_to)
+    window = await _window(session, tenant_id, date_from, date_to, context=context)
     return await service.footfall(session, window, department_id=department_id, doctor_id=doctor_id)
 
 
-@router.get("/occupancy", response_model=OccupancyReport, summary="Bed occupancy now")
+@router.get(
+    "/occupancy",
+    response_model=OccupancyReport,
+    summary="Bed occupancy now",
+    dependencies=_FULL,
+)
 async def occupancy(
     session: SessionDep, context: CanReadOperational, tenant_id: TenantId
 ) -> OccupancyReport:
@@ -133,7 +187,12 @@ async def queue(
     )
 
 
-@router.get("/inpatient", response_model=InpatientReport, summary="Admissions, ALOS and outcomes")
+@router.get(
+    "/inpatient",
+    response_model=InpatientReport,
+    summary="Admissions, ALOS and outcomes",
+    dependencies=_FULL,
+)
 async def inpatient(
     session: SessionDep,
     context: CanReadClinical,
@@ -145,7 +204,12 @@ async def inpatient(
     return await service.inpatient_summary(session, window)
 
 
-@router.get("/follow-up", response_model=FollowUpCompliance, summary="Follow-up compliance")
+@router.get(
+    "/follow-up",
+    response_model=FollowUpCompliance,
+    summary="Follow-up compliance",
+    dependencies=_FULL,
+)
 async def follow_up(
     session: SessionDep,
     context: CanReadClinical,
@@ -167,5 +231,5 @@ async def revenue(
     date_to: date | None = None,
 ) -> RevenueReport:
     """Earned, collected and outstanding — three numbers, deliberately not summed."""
-    window = await _window(session, tenant_id, date_from, date_to)
+    window = await _window(session, tenant_id, date_from, date_to, context=context)
     return await service.revenue(session, window)

@@ -67,9 +67,7 @@ async def test_reception_reads_the_visit_at_the_desk_and_nothing_wider(
     patient_id, visit_id, invoice_id = billed
     token = await _token(api, session, tenant, Roles.RECEPTIONIST)
 
-    at_desk = await api.get(
-        INVOICES, params={"encounter_id": str(visit_id)}, headers=auth(token)
-    )
+    at_desk = await api.get(INVOICES, params={"encounter_id": str(visit_id)}, headers=auth(token))
     assert at_desk.status_code == 200, at_desk.text
     assert at_desk.json()["total"] == 1
     receipts = await api.get(PAYMENTS, params={"invoice_id": invoice_id}, headers=auth(token))

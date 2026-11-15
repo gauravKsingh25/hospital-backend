@@ -152,6 +152,11 @@ class SuppressionReason(enum.StrEnum):
     # messaging off six months ago should be able to discover that is why
     # nobody is being reminded of anything, rather than seeing an empty outbox.
     DISABLED = "DISABLED"
+    # The hospital's plan does not include patient messaging. Like DISABLED, a
+    # fact about the hospital rather than the patient: it appears only on a
+    # `Notification`, and the message is recorded so an upgrade is not the
+    # first anyone hears of what was never sent.
+    NOT_IN_PLAN = "NOT_IN_PLAN"
 
 
 class NotificationTemplate(AuditedTenantModel, table=True):

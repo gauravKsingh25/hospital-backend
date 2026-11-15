@@ -21,7 +21,7 @@ from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatc
 from app.core.config import settings
 from app.core.exceptions import AuthenticationError, ValidationError
 
-TokenType = Literal["access", "refresh", "two_factor", "device"]
+TokenType = Literal["access", "refresh", "two_factor", "device", "signup"]
 
 ACCESS: Final[TokenType] = "access"
 REFRESH: Final[TokenType] = "refresh"
@@ -30,6 +30,8 @@ REFRESH: Final[TokenType] = "refresh"
 TWO_FACTOR: Final[TokenType] = "two_factor"
 # SEC-05. "Remember this device": skips the code for one person on one device.
 DEVICE: Final[TokenType] = "device"
+# Self-service signup: between the emailed code and the password.
+SIGNUP: Final[TokenType] = "signup"
 
 _hasher = PasswordHasher(
     time_cost=settings.ARGON2_TIME_COST,
@@ -217,6 +219,20 @@ def create_device_token(
         hospital_id=hospital_id,
         lifetime=timedelta(hours=settings.TWO_FACTOR_REMEMBER_HOURS),
         extra={"bind": binding},
+    )
+
+
+def create_signup_token(intent_id: uuid.UUID) -> tuple[str, TokenClaims]:
+    """Between the emailed code and the password (self-service signup).
+
+    Proves the address was verified, for half an hour. Its subject is the
+    signup, not a user: no account exists yet, so it can authenticate nothing.
+    """
+    return _create_token(
+        subject=intent_id,
+        token_type=SIGNUP,
+        hospital_id=None,
+        lifetime=timedelta(minutes=30),
     )
 
 

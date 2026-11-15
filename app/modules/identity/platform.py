@@ -16,8 +16,8 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import ColumnElement, and_, func, or_
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col, select
-from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.database import system_context
 from app.core.exceptions import ConflictError, NotFoundError

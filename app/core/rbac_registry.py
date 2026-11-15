@@ -24,11 +24,18 @@ at import time would be a cycle.
 
 from __future__ import annotations
 
+from functools import cache
 from pathlib import Path
 from types import ModuleType
 from typing import Final
 
-__all__ = ["RBAC_GRANT_MAP_NAMES", "iter_rbac_modules", "permission_codes", "role_grants"]
+__all__ = [
+    "RBAC_GRANT_MAP_NAMES",
+    "iter_rbac_modules",
+    "permission_codes",
+    "platform_only_permissions",
+    "role_grants",
+]
 
 # The name each module uses for its role -> permissions map. `identity` calls
 # its own `SYSTEM_ROLE_PERMISSIONS` because those grants are not tenant-scoped;
@@ -81,3 +88,21 @@ def permission_codes() -> set[str]:
     for module in iter_rbac_modules():
         codes.update(perm.code for perm in getattr(module, "PERMISSION_CATALOGUE", ()))
     return codes
+
+
+@cache
+def platform_only_permissions() -> frozenset[str]:
+    """Permissions no hospital role is granted: the platform owner's own.
+
+    Every `platform:*` code, plus creating and deactivating hospitals. A
+    hospital may never hold one, whatever custom role it defines: these are
+    cross-tenant powers (approving payments, extending subscriptions, reading
+    every hospital), and the routes behind them run outside row-level security.
+    """
+    from app.modules.identity.rbac import PLATFORM_ROLES
+
+    tenant: set[str] = set()
+    for role, permissions in role_grants().items():
+        if role not in PLATFORM_ROLES:
+            tenant.update(permissions)
+    return frozenset(permission_codes() - tenant)

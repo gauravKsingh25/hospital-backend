@@ -50,3 +50,45 @@ def test_local_postgres_does_not_require_tls() -> None:
     )
     assert local.requires_tls is False
     assert local.is_pooled_connection is False
+
+
+def _production(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "ENVIRONMENT": "production",
+        "DEBUG": False,
+        "SECRET_KEY": "x" * 48,
+        "MAIL_BACKEND": "smtp",
+        "SMTP_USERNAME": "mailer@example.com",
+        "SMTP_PASSWORD": "app-password",
+        "APP_PUBLIC_URL": "https://app.example.com",
+        "UPI_VPA": "nirogya@okaxis",
+        "OTP_HMAC_SECRET": "y" * 48,
+    }
+    values.update(overrides)
+    return values
+
+
+def test_production_requires_upi_vpa_and_otp_secret() -> None:
+    """A payment page with no UPI ID, or OTPs hashed with a guessable key,
+    must stop the deploy rather than reach a paying hospital."""
+    import pytest
+    from pydantic import ValidationError
+
+    from app.core.config import Settings
+
+    Settings(**_production())  # type: ignore[arg-type]
+    with pytest.raises(ValidationError, match="UPI_VPA"):
+        Settings(**_production(UPI_VPA=""))  # type: ignore[arg-type]
+    with pytest.raises(ValidationError, match="OTP_HMAC_SECRET"):
+        Settings(**_production(OTP_HMAC_SECRET=""))  # type: ignore[arg-type]
+
+
+def test_upi_vpa_must_look_like_a_upi_id() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from app.core.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(UPI_VPA="not a vpa")
+    assert Settings(UPI_VPA="Nirogya@OKAXIS").UPI_VPA == "nirogya@okaxis"

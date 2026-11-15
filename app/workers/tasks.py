@@ -42,13 +42,16 @@ from datetime import timedelta
 from typing import Any
 
 from app.core.config import settings
-from app.core.database import session_scope, tenant_session
+from app.core.database import session_scope, system_context, tenant_session
 from app.core.pagination import MAX_PAGE_SIZE, PageParams
 from app.modules.clinical import service as clinical_service
 from app.modules.identity import invites as identity_invites
+from app.modules.identity import signup as identity_signup
 from app.modules.ipd import service as ipd_service
 from app.modules.notifications import service as notifications_service
 from app.modules.scheduling import service as scheduling_service
+from app.modules.subscriptions import lifecycle as subscription_lifecycle
+from app.modules.subscriptions import orders as subscription_orders
 from app.modules.tenancy import service as tenancy_service
 
 logger = logging.getLogger(__name__)
@@ -158,6 +161,27 @@ async def expire_invites() -> int:
     return expired
 
 
+async def sweep_signups_and_orders() -> dict[str, int]:
+    """Retire unpaid payment orders and abandoned signups. Platform-level.
+
+    Bookkeeping, like the invite sweep: an expired order is refused on submit,
+    and a stale signup cannot be finished, whether or not this has run.
+    """
+    async with session_scope() as session, system_context(session):
+        orders_expired = await subscription_orders.expire_unpaid(session)
+        intents_expired = await identity_signup.expire_stale_intents(session)
+        await session.commit()
+    return {"orders_expired": orders_expired, "intents_expired": intents_expired}
+
+
+async def sweep_subscriptions() -> dict[str, int]:
+    """Renewal reminders, grace and "ended" notices, and the stored status hint."""
+    async with session_scope() as session:
+        result = await subscription_lifecycle.send_due_reminders(session)
+        await session.commit()
+    return result
+
+
 async def run_sweeps(ctx: dict[str, Any] | None = None) -> dict[str, int]:
     """The scheduled entry point. Returns a per-run tally for the job log.
 
@@ -184,6 +208,16 @@ async def run_sweeps(ctx: dict[str, Any] | None = None) -> dict[str, int]:
         totals["invites_expired"] = await expire_invites()
     except Exception:
         logger.exception("invite expiry sweep failed")
+
+    try:
+        totals.update(await sweep_signups_and_orders())
+    except Exception:
+        logger.exception("signup and payment order sweep failed")
+
+    try:
+        totals.update(await sweep_subscriptions())
+    except Exception:
+        logger.exception("subscription reminder sweep failed")
 
     if any(totals.values()):
         logger.info("sweep complete %s", totals)

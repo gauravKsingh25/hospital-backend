@@ -435,6 +435,11 @@ async def _seen_patient(api: AsyncClient, reception: str, admin: str, doctor: Us
     """Register, send to a doctor, mark seen — the real reception path.
     Returns the encounter id."""
     made = await api.post(DOCTORS, json={"user_id": str(doctor.id)}, headers=auth(admin))
+    # Seen is for a doctor whose own entry is off ("Doctors involvement").
+    off = await api.put(
+        f"{DOCTORS}/{made.json()['id']}/involvement", json={"enabled": False}, headers=auth(admin)
+    )
+    assert off.status_code == 200, off.text
     assert made.status_code == 201, made.text
     registered = await api.post(
         PATIENTS,
@@ -505,7 +510,9 @@ class TestTheHandOffOverHttp:
         )
         assert admitted.status_code == 201, admitted.text
         assert admitted.json()["status"] == "ADMITTED"
-        assert admitted.json()["encounter_id"] == encounter_id
+        # Seen closed the OPD visit (the doctor does not record their own), so
+        # the stay opens on a fresh visit, the path any completed visit takes.
+        assert admitted.json()["encounter_id"] != encounter_id
 
         # And reception can see what became of the patient it sent.
         mine = await api.get(REQUESTS, headers=auth(reception_token))
@@ -514,7 +521,11 @@ class TestTheHandOffOverHttp:
         assert row["admission_id"] == admitted.json()["id"]
 
         visit = await api.get(f"{ENCOUNTERS}/{encounter_id}", headers=auth(desk_token))
-        assert visit.json()["status"] == "ADMITTED"
+        assert visit.json()["status"] == "COMPLETED"
+        stay = await api.get(
+            f"{ENCOUNTERS}/{admitted.json()['encounter_id']}", headers=auth(desk_token)
+        )
+        assert stay.json()["status"] == "ADMITTED"
 
     async def test_an_administrator_can_do_both_halves(
         self,

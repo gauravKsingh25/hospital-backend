@@ -22,7 +22,7 @@ import enum
 import uuid
 from datetime import date, datetime, time
 
-from sqlalchemy import Date, DateTime, Index, Time, text
+from sqlalchemy import Date, DateTime, Index, Time, text, true
 from sqlmodel import Field
 
 from app.core.models import AuditedTenantModel, TenantModel
@@ -157,6 +157,11 @@ class Doctor(AuditedTenantModel, table=True):
     # before it wastes a patient's trip.
     is_accepting_appointments: bool = Field(default=True, index=True)
     is_active: bool = Field(default=True, index=True)
+    # "Doctors involvement". On: the doctor records and closes their own visits.
+    # Off: reception and nurses mark this doctor's patients seen, and the doctor
+    # can only look (clinical refuses their writes). Only the hospital admin
+    # flips it, per doctor, because some doctors never log in.
+    involvement_enabled: bool = Field(default=True, sa_column_kwargs={"server_default": true()})
 
 
 class DoctorAvailability(AuditedTenantModel, table=True):

@@ -15,7 +15,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Request, status
 
 from app.core.deps import SessionDep, TenantId, get_client_ip, require
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import NotFoundError, PermissionDeniedError, ValidationError
 from app.core.pagination import MAX_PAGE_SIZE, Page, PageParams, page_params
 from app.modules.clinical import service
 from app.modules.clinical.models import (
@@ -34,6 +34,7 @@ from app.modules.clinical.schemas import (
     DeathRecord,
     DiagnosisCreate,
     DiagnosisRead,
+    DoctorVisitRead,
     EncounterChart,
     EncounterEventRead,
     EncounterOpen,
@@ -59,7 +60,9 @@ from app.modules.clinical.schemas import (
 )
 from app.modules.identity import service as identity_service
 from app.modules.identity.service import AuthContext
+from app.modules.patients import service as patients_service
 from app.modules.scheduling import service as scheduling_service
+from app.modules.scheduling.rbac import SchedulingPermissions
 from app.modules.tenancy import service as tenancy_service
 
 encounters_router = APIRouter(prefix="/encounters", tags=["clinical"])
@@ -178,6 +181,63 @@ async def open_encounter(
     )
     await session.commit()
     return await _render_encounter(session, encounter, context)
+
+
+@encounters_router.get(
+    "/by-doctor/{doctor_id}",
+    response_model=Page[DoctorVisitRead],
+    summary="A doctor's patients seen",
+)
+async def list_doctor_visits(
+    doctor_id: uuid.UUID,
+    session: SessionDep,
+    context: CanReadEncounter,
+    tenant_id: TenantId,
+    params: Annotated[PageParams, Depends(page_params)],
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> Page[DoctorVisitRead]:
+    """The doctor page's history. Only the admin and that doctor read it.
+
+    Reception reads encounters all day, but a doctor's whole patient list is
+    not something the front desk needs, so this asks for more than
+    `encounter:read`: the admin's `doctor:involvement:manage`, or being the
+    doctor.
+    """
+    doctor = await scheduling_service.get_doctor(session, doctor_id, hospital_id=tenant_id)
+    if not (
+        context.has_permission(SchedulingPermissions.DOCTOR_INVOLVEMENT_MANAGE)
+        or doctor.user_id == context.user.id
+    ):
+        raise PermissionDeniedError(
+            "Only the admin and the doctor can see this doctor's patients.",
+            code="doctor_visits_forbidden",
+        )
+    encounters, total = await service.list_doctor_visits(
+        session,
+        params,
+        hospital_id=tenant_id,
+        doctor_id=doctor.id,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    patients = await patients_service.get_patients_by_ids(
+        session, {row.patient_id for row in encounters}, hospital_id=tenant_id
+    )
+    items = []
+    for row in encounters:
+        patient = patients.get(row.patient_id)
+        items.append(
+            DoctorVisitRead(
+                encounter_id=row.id,
+                patient_id=row.patient_id,
+                patient_name=patient.full_name if patient else "",
+                uhid=patient.uhid if patient else "",
+                status=row.status,
+                visit_at=row.created_at,
+            )
+        )
+    return Page.build(items, total=total, params=params)
 
 
 @encounters_router.get("", response_model=Page[EncounterSummary], summary="List visits")

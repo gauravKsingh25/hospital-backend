@@ -9,7 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Request, status
 
 from app.core.deps import SessionDep, TenantId, get_client_ip, require
-from app.core.exceptions import NotFoundError, PermissionDeniedError, ValidationError
+from app.core.exceptions import ConflictError, NotFoundError, PermissionDeniedError, ValidationError
 from app.core.models import utc_now
 from app.core.pagination import Page, PageParams, page_params
 from app.modules.billing import service as billing_service
@@ -45,6 +45,7 @@ from app.modules.scheduling.schemas import (
     DoctorAvailabilityCreate,
     DoctorAvailabilityRead,
     DoctorCreate,
+    DoctorInvolvementUpdate,
     DoctorQueue,
     DoctorRead,
     DoctorUpdate,
@@ -73,6 +74,9 @@ CanReadDoctor = Annotated[AuthContext, Depends(require(SchedulingPermissions.DOC
 CanManageDoctor = Annotated[AuthContext, Depends(require(SchedulingPermissions.DOCTOR_MANAGE))]
 CanManageAvailability = Annotated[
     AuthContext, Depends(require(SchedulingPermissions.AVAILABILITY_MANAGE))
+]
+CanManageInvolvement = Annotated[
+    AuthContext, Depends(require(SchedulingPermissions.DOCTOR_INVOLVEMENT_MANAGE))
 ]
 CanBook = Annotated[AuthContext, Depends(require(SchedulingPermissions.APPOINTMENT_CREATE))]
 CanReadAppointment = Annotated[
@@ -226,6 +230,42 @@ async def update_doctor(
     return DoctorRead.model_validate(updated)
 
 
+@doctors_router.put(
+    "/{doctor_id}/involvement",
+    response_model=DoctorRead,
+    summary="Turn a doctor's own data entry on or off",
+)
+async def set_doctor_involvement(
+    doctor_id: uuid.UUID,
+    payload: DoctorInvolvementUpdate,
+    session: SessionDep,
+    request: Request,
+    context: CanManageInvolvement,
+    tenant_id: TenantId,
+) -> DoctorRead:
+    """ "Doctors involvement", per doctor.
+
+    Off, reception and nurses mark this doctor's patients seen and the doctor
+    can only look; on, the doctor records and closes their own visits. Audited
+    with before and after, because it changes who may close a clinical visit.
+    """
+    doctor = await service.get_doctor(session, doctor_id, hospital_id=tenant_id)
+    before = doctor.involvement_enabled
+    updated = await service.set_doctor_involvement(session, doctor, enabled=payload.enabled)
+    await identity_service.record_audit(
+        session,
+        action="doctor.involvement_changed",
+        actor=context.user,
+        hospital_id=tenant_id,
+        resource_type="doctor",
+        resource_id=updated.id,
+        changes={"before": {"enabled": before}, "after": {"enabled": updated.involvement_enabled}},
+        ip_address=await get_client_ip(request),
+    )
+    await session.commit()
+    return DoctorRead.model_validate(updated)
+
+
 async def _open_encounter_for(
     session: SessionDep,
     appointment: Appointment,
@@ -331,6 +371,97 @@ async def add_exception(
     )
     await session.commit()
     return AvailabilityExceptionRead.model_validate(exception)
+
+
+@doctors_router.delete(
+    "/{doctor_id}/availability/{availability_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove a weekly clinic session",
+)
+async def remove_availability(
+    doctor_id: uuid.UUID,
+    availability_id: uuid.UUID,
+    session: SessionDep,
+    request: Request,
+    context: CanManageAvailability,
+    tenant_id: TenantId,
+) -> None:
+    doctor = await service.get_doctor(session, doctor_id, hospital_id=tenant_id)
+    if not _may_manage_doctor(context, doctor.user_id):
+        raise NotFoundError("Doctor not found.", code="doctor_not_found")
+    row = await service.remove_availability(
+        session, doctor_id=doctor.id, availability_id=availability_id, hospital_id=tenant_id
+    )
+    await identity_service.record_audit(
+        session,
+        action="doctor.availability_removed",
+        actor=context.user,
+        hospital_id=tenant_id,
+        resource_type="doctor_availability",
+        resource_id=row.id,
+        changes={
+            "doctor_id": str(doctor.id),
+            "weekday": int(row.weekday),
+            "start_time": row.start_time.isoformat(),
+            "end_time": row.end_time.isoformat(),
+        },
+        ip_address=await get_client_ip(request),
+    )
+    await session.commit()
+
+
+@doctors_router.get(
+    "/{doctor_id}/exceptions",
+    response_model=list[AvailabilityExceptionRead],
+    summary="Days off and extra clinics from a date on",
+)
+async def list_exceptions(
+    doctor_id: uuid.UUID,
+    session: SessionDep,
+    context: CanReadDoctor,
+    tenant_id: TenantId,
+    from_date: date | None = None,
+) -> list[AvailabilityExceptionRead]:
+    doctor = await service.get_doctor(session, doctor_id, hospital_id=tenant_id)
+    rows = await service.list_availability_exceptions(
+        session,
+        doctor_id=doctor.id,
+        hospital_id=tenant_id,
+        from_date=from_date or utc_now().date(),
+    )
+    return [AvailabilityExceptionRead.model_validate(row) for row in rows]
+
+
+@doctors_router.delete(
+    "/{doctor_id}/exceptions/{exception_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove a day off or extra clinic",
+)
+async def remove_exception(
+    doctor_id: uuid.UUID,
+    exception_id: uuid.UUID,
+    session: SessionDep,
+    request: Request,
+    context: CanManageAvailability,
+    tenant_id: TenantId,
+) -> None:
+    doctor = await service.get_doctor(session, doctor_id, hospital_id=tenant_id)
+    if not _may_manage_doctor(context, doctor.user_id):
+        raise NotFoundError("Doctor not found.", code="doctor_not_found")
+    row = await service.remove_availability_exception(
+        session, doctor_id=doctor.id, exception_id=exception_id, hospital_id=tenant_id
+    )
+    await identity_service.record_audit(
+        session,
+        action="doctor.leave_removed",
+        actor=context.user,
+        hospital_id=tenant_id,
+        resource_type="availability_exception",
+        resource_id=row.id,
+        changes={"doctor_id": str(doctor.id), "date": row.exception_date.isoformat()},
+        ip_address=await get_client_ip(request),
+    )
+    await session.commit()
 
 
 @doctors_router.get(
@@ -892,6 +1023,7 @@ async def queue_board(
             department_id=doctor.department_id,
             department_name=department.name if department else None,
             is_accepting_appointments=doctor.is_accepting_appointments,
+            involvement_enabled=doctor.involvement_enabled,
         )
 
     for entry in entries:
@@ -1001,6 +1133,14 @@ async def complete_consultation(
     entry_id: uuid.UUID, session: SessionDep, context: CanManageQueue, tenant_id: TenantId
 ) -> QueueEntryRead:
     entry = await service.get_queue_entry(session, entry_id, hospital_id=tenant_id)
+    # "Doctors involvement" off: the doctor's own "finish" is refused; queue
+    # staff close these visits with Seen instead.
+    if not await service.is_doctor_involved(session, entry.doctor_id, hospital_id=tenant_id):
+        raise ConflictError(
+            "Doctor entry is off for this doctor. Reception marks patients seen.",
+            code="doctor_entry_off",
+            details={"doctor_id": str(entry.doctor_id)},
+        )
     updated = await service.complete_consultation(session, entry, actor_id=context.user.id)
     await session.commit()
     return QueueEntryRead.model_validate(updated)
@@ -1155,6 +1295,24 @@ async def mark_seen(
     seen everywhere or nowhere.
     """
     entry = await service.get_queue_entry(session, entry_id, hospital_id=tenant_id)
+    # Seen is for a doctor who does not record their own visits. While the
+    # doctor's entry is on, the doctor closes the visit; a second way to close
+    # it from the front desk would only race them.
+    if await service.is_doctor_involved(session, entry.doctor_id, hospital_id=tenant_id):
+        raise ConflictError(
+            "This doctor records their own visits.",
+            code="doctor_involved",
+            details={"doctor_id": str(entry.doctor_id)},
+        )
+    # Off means the doctor can only look: Seen closes the visit, so the
+    # doctor may not press it on their own patients (they hold queue:manage).
+    token_doctor = await service.get_doctor(session, entry.doctor_id, hospital_id=tenant_id)
+    if token_doctor.user_id == context.user.id:
+        raise ConflictError(
+            "Doctor entry is off for this doctor. Reception marks patients seen.",
+            code="doctor_entry_off",
+            details={"doctor_id": str(entry.doctor_id)},
+        )
     before = entry.status.value
 
     encounter = None

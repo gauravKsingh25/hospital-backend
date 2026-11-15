@@ -420,6 +420,16 @@ class TestReceptionCanReorderALine:
 
 
 class TestReceptionMarksAPatientSeen:
+    """Seen is for a doctor whose own entry is off ("Doctors involvement"), so
+    every test here starts with that doctor switched off."""
+
+    @pytest.fixture(autouse=True)
+    async def _doctor_entry_off(self, api: AsyncClient, admin_token: str, doctor_id: str) -> None:
+        response = await api.put(
+            f"{DOCTORS}/{doctor_id}/involvement", json={"enabled": False}, headers=auth(admin_token)
+        )
+        assert response.status_code == 200, response.text
+
     async def _queue(
         self, api: AsyncClient, token: str, *, doctor_id: str, name: str, phone: str
     ) -> dict[str, str]:
@@ -473,7 +483,8 @@ class TestReceptionMarksAPatientSeen:
         encounter = await api.get(
             f"{ENCOUNTERS}/{queued['encounter_id']}", headers=auth(reception_token)
         )
-        assert encounter.json()["status"] == "IN_CONSULTATION"
+        # The doctor does not record their own visits, so Seen closes it.
+        assert encounter.json()["status"] == "COMPLETED"
 
         timeline = await api.get(
             f"{ENCOUNTERS}/{queued['encounter_id']}/timeline", headers=auth(reception_token)
@@ -515,22 +526,14 @@ class TestReceptionMarksAPatientSeen:
         )
         assert encounter.json()["status"] == "COMPLETED"
 
-    async def test_the_doctor_can_still_document_and_complete_the_visit(
-        self, api: AsyncClient, reception_token: str, doctor_user: User, doctor_id: str
+    async def test_the_seen_row_still_names_the_closed_visit(
+        self, api: AsyncClient, reception_token: str, doctor_id: str
     ) -> None:
         queued = await self._queue(
             api, reception_token, doctor_id=doctor_id, name="Late Notes", phone="9812500031"
         )
-        await api.post(f"{QUEUE}/{queued['entry_id']}/seen", headers=auth(reception_token))
-
-        doctor_token = await login(api, doctor_user)
-        done = await api.post(
-            f"{ENCOUNTERS}/{queued['encounter_id']}/complete",
-            json={},
-            headers=auth(doctor_token),
-        )
-        assert done.status_code == 200, done.text
-        assert done.json()["status"] == "COMPLETED"
+        seen = await api.post(f"{QUEUE}/{queued['entry_id']}/seen", headers=auth(reception_token))
+        assert seen.status_code == 200, seen.text
 
         # The seen row still names the visit once it has closed — reception
         # sends the patient for admission from that row.

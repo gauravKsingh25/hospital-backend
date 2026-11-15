@@ -86,6 +86,15 @@ class DoctorRead(BaseModel):
     default_slot_minutes: int
     is_accepting_appointments: bool
     is_active: bool
+    involvement_enabled: bool
+
+
+class DoctorInvolvementUpdate(BaseModel):
+    """Turn a doctor's own data entry on or off ("Doctors involvement")."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +471,9 @@ class DoctorQueue(BaseModel):
     department_id: uuid.UUID | None = None
     department_name: str | None = None
     is_accepting_appointments: bool = True
+    # Off: reception and nurses mark this doctor's patients seen (the board
+    # shows the Seen button only then).
+    involvement_enabled: bool = True
 
     waiting: int = 0
     in_consultation: int = 0

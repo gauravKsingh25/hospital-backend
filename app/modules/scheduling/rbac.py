@@ -29,6 +29,11 @@ class SchedulingPermissions:
     # Check in, call next, skip, complete — the running of the waiting room.
     QUEUE_MANAGE = "queue:manage"
 
+    # "Doctors involvement": whether a doctor records their own visits or
+    # front-of-house marks them seen. Admin only; it changes who may close a
+    # clinical visit.
+    DOCTOR_INVOLVEMENT_MANAGE = "doctor:involvement:manage"
+
 
 PERMISSION_CATALOGUE: Final[tuple[PermissionDef, ...]] = (
     PermissionDef(SchedulingPermissions.DEPARTMENT_READ, TENANCY_MODULE, "View departments."),
@@ -47,6 +52,11 @@ PERMISSION_CATALOGUE: Final[tuple[PermissionDef, ...]] = (
     PermissionDef(SchedulingPermissions.QUEUE_READ, MODULE, "View the OPD queue."),
     PermissionDef(
         SchedulingPermissions.QUEUE_MANAGE, MODULE, "Check in, call, skip and complete tokens."
+    ),
+    PermissionDef(
+        SchedulingPermissions.DOCTOR_INVOLVEMENT_MANAGE,
+        MODULE,
+        "Turn a doctor's own data entry on or off.",
     ),
 )
 

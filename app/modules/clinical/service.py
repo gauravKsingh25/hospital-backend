@@ -20,7 +20,8 @@ from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import ColumnElement, func, or_, text
 from sqlalchemy import select as sa_select
@@ -87,6 +88,7 @@ from app.modules.identity import service as identity_service
 from app.modules.identity.models import User
 from app.modules.identity.rbac import Roles
 from app.modules.patients import service as patients_service
+from app.modules.scheduling import service as scheduling_service
 from app.modules.subscriptions import service as subscriptions_service
 from app.modules.subscriptions.features import FeatureKey
 from app.modules.tenancy import service as tenancy_service
@@ -390,6 +392,40 @@ async def get_encounter_by_appointment(
     )
 
 
+DOCTOR_ENTRY_OFF = "Doctor entry is off for this doctor. Reception marks patients seen."
+
+# Encounter fields that move a visit between doctors rather than record anything
+# about the patient. Reassigning stays open while a doctor's entry is off: the
+# patient then goes to a doctor who records their own visit.
+_REASSIGN_FIELDS: frozenset[str] = frozenset({"doctor_id", "department_id"})
+
+
+async def _require_doctor_entry(session: AsyncSession, encounter: Encounter) -> None:
+    """Refuse a doctor-side write while the visit's doctor has entry turned off.
+
+    "Doctors involvement" (scheduling owns the switch). Off, reception and
+    nurses mark the doctor's patients seen and nobody, the admin included,
+    writes the doctor's part of the record; the admin's way round is to flip
+    the switch back on. Only OPD: an admitted stay is outside the switch, and a
+    visit with no doctor is never blocked.
+    """
+    if encounter.status is EncounterStatus.ADMITTED:
+        return
+    if await scheduling_service.is_doctor_involved(
+        session, encounter.doctor_id, hospital_id=encounter.hospital_id
+    ):
+        return
+    raise ConflictError(
+        DOCTOR_ENTRY_OFF,
+        code="doctor_entry_off",
+        details={"doctor_id": str(encounter.doctor_id)},
+    )
+
+
+async def _encounter_of(session: AsyncSession, encounter_id: uuid.UUID) -> Encounter | None:
+    return await session.get(Encounter, encounter_id)
+
+
 async def record_seen_by_staff(
     session: AsyncSession, encounter: Encounter, *, actor: User | None
 ) -> Encounter:
@@ -405,19 +441,31 @@ async def record_seen_by_staff(
     a patient reception watched walk out of the doctor's room as having never
     been seen — in footfall, in follow-up compliance, everywhere.
 
-    It stops there. Completing the visit weighs pending labs, medicines and
-    bills (CLAUDE.md §6), and that stays with the doctor's "complete visit" or
-    the auto-close, which will close it as COMPLETED once nothing is pending.
-    A visit already past `REGISTERED` is left exactly as it is.
+    For a doctor whose entry is on, it stops there: completing the visit
+    weighs pending labs, medicines and bills (CLAUDE.md §6), and that stays
+    with the doctor's "complete visit" or the auto-close.
+
+    For a doctor whose entry is off ("Doctors involvement"), nobody can press
+    "complete visit", so Seen completes it, through the same close the doctor
+    would use, landing on COMPLETED, AWAITING_RESULTS or PENDING_CLEARANCE by
+    what is still open, never by anyone picking a status.
     """
-    if encounter.status is not EncounterStatus.REGISTERED:
+    if encounter.status is EncounterStatus.REGISTERED:
+        encounter = await transition(
+            session,
+            encounter,
+            EncounterStatus.IN_CONSULTATION,
+            actor=actor,
+            reason="Marked as seen by reception.",
+        )
+    if encounter.status is not EncounterStatus.IN_CONSULTATION:
         return encounter
-    return await transition(
-        session,
-        encounter,
-        EncounterStatus.IN_CONSULTATION,
-        actor=actor,
-        reason="Marked as seen by reception.",
+    if await scheduling_service.is_doctor_involved(
+        session, encounter.doctor_id, hospital_id=encounter.hospital_id
+    ):
+        return encounter
+    return await _close_consultation(
+        session, encounter, actor=actor, reason="Marked as seen by reception."
     )
 
 
@@ -624,10 +672,76 @@ async def list_encounters(
     return list(rows), total
 
 
+# A doctor's "patients seen": the visits that reached a consultation. Not a
+# no-show or a cancellation: the doctor never saw those patients.
+SEEN_STATUSES: Final[frozenset[EncounterStatus]] = frozenset(
+    {
+        EncounterStatus.IN_CONSULTATION,
+        EncounterStatus.AWAITING_RESULTS,
+        EncounterStatus.PENDING_CLEARANCE,
+        EncounterStatus.COMPLETED,
+        EncounterStatus.ADMITTED,
+        EncounterStatus.REFERRED_OUT,
+        EncounterStatus.LAMA,
+        EncounterStatus.DECEASED,
+    }
+)
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+async def list_doctor_visits(
+    session: AsyncSession,
+    params: PageParams,
+    *,
+    hospital_id: uuid.UUID,
+    doctor_id: uuid.UUID,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> tuple[list[Encounter], int]:
+    """A doctor's OPD visits that reached them, newest first (the doctor page).
+
+    Dates are the hospital's calendar days (Asia/Kolkata), inclusive, so a
+    7 a.m. visit is filed on the day the patient came, not the UTC day before.
+    """
+    filters: list[ColumnElement[bool]] = [
+        col(Encounter.hospital_id) == hospital_id,
+        col(Encounter.deleted_at).is_(None),
+        col(Encounter.doctor_id) == doctor_id,
+        col(Encounter.encounter_type) == EncounterType.OPD,
+        col(Encounter.status).in_(SEEN_STATUSES),
+    ]
+    if date_from is not None:
+        start = datetime.combine(date_from, datetime.min.time(), tzinfo=_IST)
+        filters.append(col(Encounter.created_at) >= start)
+    if date_to is not None:
+        end = datetime.combine(date_to, datetime.min.time(), tzinfo=_IST) + timedelta(days=1)
+        filters.append(col(Encounter.created_at) < end)
+
+    total = (
+        await session.execute(select(func.count()).select_from(Encounter).where(*filters))
+    ).scalar_one()
+    rows = (
+        (
+            await session.execute(
+                select(Encounter)
+                .where(*filters)
+                .order_by(col(Encounter.created_at).desc(), col(Encounter.id).desc())
+                .limit(params.limit)
+                .offset(params.offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return list(rows), total
+
+
 async def update_encounter(
     session: AsyncSession, encounter: Encounter, payload: EncounterUpdate
 ) -> Encounter:
     """Edit the non-status fields. Status is not among them, by design."""
+    if set(payload.model_dump(exclude_unset=True)) - _REASSIGN_FIELDS:
+        await _require_doctor_entry(session, encounter)
     if encounter.is_closed:
         raise ConflictError(
             "This visit is closed and cannot be edited.",
@@ -647,6 +761,7 @@ async def start_consultation(
     session: AsyncSession, encounter: Encounter, *, actor: User | None = None
 ) -> Encounter:
     """The doctor has the patient in front of them."""
+    await _require_doctor_entry(session, encounter)
     return await transition(session, encounter, EncounterStatus.IN_CONSULTATION, actor=actor)
 
 
@@ -671,6 +786,31 @@ async def complete_consultation(
     The patient does not have to walk back to reception for any of this, which
     is the entire reason the state machine exists rather than a "closed" flag
     someone remembers to tick.
+    """
+    await _require_doctor_entry(session, encounter)
+    return await _close_consultation(
+        session,
+        encounter,
+        actor=actor,
+        follow_up_date=follow_up_date,
+        follow_up_instructions=follow_up_instructions,
+        reason=reason,
+    )
+
+
+async def _close_consultation(
+    session: AsyncSession,
+    encounter: Encounter,
+    *,
+    actor: User | None = None,
+    follow_up_date: date | None = None,
+    follow_up_instructions: str | None = None,
+    reason: str | None = None,
+) -> Encounter:
+    """Close the consultation by what is still open (CLAUDE.md §6).
+
+    Shared by the doctor's "complete visit" and, for a doctor whose entry is
+    off, reception's Seen. No guard here: callers decide who may close.
     """
     if encounter.is_closed:
         raise ConflictError(
@@ -1081,6 +1221,7 @@ async def place_order(
     *,
     actor: User,
 ) -> Order:
+    await _require_doctor_entry(session, encounter)
     if encounter.is_closed:
         raise ConflictError(
             "This visit is closed; orders cannot be added.",
@@ -1288,8 +1429,18 @@ async def cancel_order(
     reason: str,
     actor: User,
     hospital_id: uuid.UUID,
+    enforce_doctor_entry: bool = True,
 ) -> tuple[Order, Encounter]:
-    """Withdraw an order. A cancelled order stops holding the visit open."""
+    """Withdraw an order. A cancelled order stops holding the visit open.
+
+    `enforce_doctor_entry=False` is for the lab cancelling its own
+    investigation (`diagnostics.cancel_report`): that is clearance, not the
+    doctor's act, and must work while the doctor's entry is off, or the visit
+    is held open with nobody able to release it.
+    """
+    owner = await _encounter_of(session, order.encounter_id)
+    if owner is not None and enforce_doctor_entry:
+        await _require_doctor_entry(session, owner)
     if order.status in (OrderStatus.COMPLETED, OrderStatus.CANCELLED):
         raise ConflictError(
             f"This order is already {order.status.value.lower()}.", code="order_closed"
@@ -1437,6 +1588,7 @@ async def write_note(
     original — which is what makes the record defensible, and what a court would
     expect to see.
     """
+    await _require_doctor_entry(session, encounter)
     if encounter.is_closed:
         raise ConflictError(
             "This visit is closed; notes cannot be added.",
@@ -1505,6 +1657,9 @@ async def get_note(
 
 async def sign_note(session: AsyncSession, note: ClinicalNote, *, actor: User) -> ClinicalNote:
     """e-Sign a draft. Only its author may sign it."""
+    owner = await _encounter_of(session, note.encounter_id)
+    if owner is not None:
+        await _require_doctor_entry(session, owner)
     if note.is_signed:
         raise ConflictError("This note is already signed.", code="note_already_signed")
     if note.authored_by_id != actor.id:
@@ -1657,6 +1812,7 @@ async def record_diagnosis(
     the caller into delete-then-insert, which is a sequence a user can leave
     half finished.
     """
+    await _require_doctor_entry(session, encounter)
     if encounter.is_closed:
         raise ConflictError(
             "This visit is closed; a diagnosis cannot be added.",

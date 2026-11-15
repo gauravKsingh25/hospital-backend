@@ -1411,8 +1411,15 @@ async def cancel_report(
 
     order = await clinical_service.get_order(session, report.order_id, hospital_id=hospital_id)
     if order.status not in (OrderStatus.COMPLETED, OrderStatus.CANCELLED):
+        # The lab's act, not the doctor's: never held back by "Doctors
+        # involvement", or an off doctor's visit could not clear.
         await clinical_service.cancel_order(
-            session, order, reason=reason, actor=actor, hospital_id=hospital_id
+            session,
+            order,
+            reason=reason,
+            actor=actor,
+            hospital_id=hospital_id,
+            enforce_doctor_entry=False,
         )
 
     await session.refresh(report)

@@ -484,3 +484,49 @@ class TestPermissions:
     async def test_an_unauthenticated_request_is_refused(self, api: AsyncClient) -> None:
         response = await api.get(CATALOGUE)
         assert response.status_code == 401, response.text
+
+
+class TestDoctorsInvolvementOff:
+    """An off doctor's visit (Doctors involvement) must still clear at the lab:
+    cancelling the investigation is the lab's act, not the doctor's."""
+
+    async def test_cancelling_the_report_clears_an_off_doctors_visit(
+        self,
+        api: AsyncClient,
+        admin_token: str,
+        reception_token: str,
+        doctor_token: str,
+        tech_token: str,
+        encounter_id: str,
+        cbc_id: str,
+    ) -> None:
+        order_id = await _order_cbc(api, doctor_token, encounter_id)
+        report = await api.post(
+            REPORTS,
+            json={"order_id": order_id, "catalogue_item_id": cbc_id},
+            headers=auth(tech_token),
+        )
+        assert report.status_code == 201, report.text
+
+        visit = await api.get(f"{ENCOUNTERS}/{encounter_id}", headers=auth(admin_token))
+        doctor_id = visit.json()["doctor_id"]
+        off = await api.put(
+            f"{DOCTORS}/{doctor_id}/involvement", json={"enabled": False}, headers=auth(admin_token)
+        )
+        assert off.status_code == 200, off.text
+
+        queue = await api.get(QUEUE, headers=auth(reception_token))
+        [entry] = [row for row in queue.json() if row["encounter_id"] == encounter_id]
+        seen = await api.post(f"{QUEUE}/{entry['id']}/seen", headers=auth(reception_token))
+        assert seen.status_code == 200, seen.text
+        held = await api.get(f"{ENCOUNTERS}/{encounter_id}", headers=auth(admin_token))
+        assert held.json()["status"] in {"AWAITING_RESULTS", "PENDING_CLEARANCE"}
+
+        cancelled = await api.post(
+            f"{REPORTS}/{report.json()['id']}/cancel",
+            json={"reason": "Sample haemolysed"},
+            headers=auth(admin_token),
+        )
+        assert cancelled.status_code == 200, cancelled.text
+        closed = await api.get(f"{ENCOUNTERS}/{encounter_id}", headers=auth(admin_token))
+        assert closed.json()["status"] == "COMPLETED"

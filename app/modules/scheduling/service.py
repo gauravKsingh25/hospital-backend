@@ -272,6 +272,37 @@ async def list_all_active_doctors(session: AsyncSession, *, hospital_id: uuid.UU
     return list(rows)
 
 
+async def set_doctor_involvement(session: AsyncSession, doctor: Doctor, *, enabled: bool) -> Doctor:
+    """Turn the doctor's own data entry on or off ("Doctors involvement")."""
+    doctor.involvement_enabled = enabled
+    doctor.updated_at = utc_now()
+    session.add(doctor)
+    await session.flush()
+    await session.refresh(doctor)
+    return doctor
+
+
+async def is_doctor_involved(
+    session: AsyncSession, doctor_id: uuid.UUID | None, *, hospital_id: uuid.UUID
+) -> bool:
+    """Whether this doctor records their own visits.
+
+    A visit with no doctor (an emergency registration), or a doctor that cannot
+    be found, is treated as involved: the switch only ever narrows what a
+    named doctor's visits allow, it never blocks a visit nobody owns.
+    """
+    if doctor_id is None:
+        return True
+    value = (
+        await session.execute(
+            select(Doctor.involvement_enabled).where(
+                col(Doctor.id) == doctor_id, col(Doctor.hospital_id) == hospital_id
+            )
+        )
+    ).scalar_one_or_none()
+    return True if value is None else bool(value)
+
+
 async def update_doctor(session: AsyncSession, doctor: Doctor, payload: DoctorUpdate) -> Doctor:
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(doctor, field, value)
@@ -320,6 +351,91 @@ async def set_availability(
     await session.flush()
     await session.refresh(availability)
     return availability
+
+
+async def remove_availability(
+    session: AsyncSession,
+    *,
+    doctor_id: uuid.UUID,
+    availability_id: uuid.UUID,
+    hospital_id: uuid.UUID,
+) -> DoctorAvailability:
+    """Retire a weekly clinic session (it stops producing slots)."""
+    row = (
+        await session.execute(
+            select(DoctorAvailability).where(
+                col(DoctorAvailability.id) == availability_id,
+                col(DoctorAvailability.doctor_id) == doctor_id,
+                col(DoctorAvailability.hospital_id) == hospital_id,
+                col(DoctorAvailability.deleted_at).is_(None),
+                col(DoctorAvailability.is_active).is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise NotFoundError("Clinic session not found.", code="availability_not_found")
+    row.is_active = False
+    row.updated_at = utc_now()
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def list_availability_exceptions(
+    session: AsyncSession,
+    *,
+    doctor_id: uuid.UUID,
+    hospital_id: uuid.UUID,
+    from_date: date,
+) -> list[AvailabilityException]:
+    """A doctor's days off and extra clinics from `from_date` on, by date.
+
+    Bounded by nature: future dates for one doctor.
+    """
+    rows = (
+        (
+            await session.execute(
+                select(AvailabilityException)
+                .where(
+                    col(AvailabilityException.doctor_id) == doctor_id,
+                    col(AvailabilityException.hospital_id) == hospital_id,
+                    col(AvailabilityException.deleted_at).is_(None),
+                    col(AvailabilityException.exception_date) >= from_date,
+                )
+                .order_by(col(AvailabilityException.exception_date))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return list(rows)
+
+
+async def remove_availability_exception(
+    session: AsyncSession,
+    *,
+    doctor_id: uuid.UUID,
+    exception_id: uuid.UUID,
+    hospital_id: uuid.UUID,
+) -> AvailabilityException:
+    """Withdraw a day off or extra clinic (soft-deleted, so the record stays)."""
+    row = (
+        await session.execute(
+            select(AvailabilityException).where(
+                col(AvailabilityException.id) == exception_id,
+                col(AvailabilityException.doctor_id) == doctor_id,
+                col(AvailabilityException.hospital_id) == hospital_id,
+                col(AvailabilityException.deleted_at).is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise NotFoundError("Day off not found.", code="availability_exception_not_found")
+    row.deleted_at = utc_now()
+    row.updated_at = utc_now()
+    session.add(row)
+    await session.flush()
+    return row
 
 
 async def list_availability(

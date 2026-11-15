@@ -142,6 +142,17 @@ class EncounterRead(BaseModel):
     created_at: datetime
 
 
+class DoctorVisitRead(BaseModel):
+    """One row of a doctor's "patients seen" (the doctor page)."""
+
+    encounter_id: uuid.UUID
+    patient_id: uuid.UUID
+    patient_name: str
+    uhid: str
+    status: EncounterStatus
+    visit_at: datetime
+
+
 class EncounterSummary(BaseModel):
     """The work-list row. Deliberately light — a busy OPD list is long."""
 

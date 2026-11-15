@@ -9,7 +9,7 @@ never appears for anyone and a bug report six weeks later that reception
 
 Emitting a union type turns every one of those typos into a build failure.
 
-    python scripts/export_rbac.py --output ../frontend/src/types/rbac.generated.ts
+    python scripts/export_rbac.py --output ../hospital-frontend/src/types/rbac.generated.ts
 
 Like `export_openapi.py`, this touches no database and starts no server: the
 declarations are read straight from each module's `rbac.py`.
@@ -105,7 +105,9 @@ def export(output: Path) -> int:
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        render(permissions=permissions, roles=roles, modules=modules), encoding="utf-8"
+        render(permissions=permissions, roles=roles, modules=modules),
+        encoding="utf-8",
+        newline="\n",  # LF on every OS: the frontend's codegen:check compares bytes
     )
 
     print(f"Wrote {output} — {len(permissions)} permissions, {len(roles)} roles.")
@@ -118,7 +120,7 @@ def main() -> int:
         "--output",
         type=Path,
         default=Path(__file__).resolve().parents[2]
-        / "frontend"
+        / "hospital-frontend"
         / "src"
         / "types"
         / "rbac.generated.ts",

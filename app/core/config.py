@@ -14,8 +14,8 @@ from pydantic import Field, SecretStr, computed_field, field_validator, model_va
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from sqlalchemy.engine import URL, make_url
 
-# repo root: backend/app/core/config.py -> backend/app/core -> backend/app -> backend -> repo
-REPO_ROOT = Path(__file__).resolve().parents[3]
+# repo root: app/core/config.py -> app/core -> app -> repo
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 Environment = Literal["local", "development", "staging", "production"]
 
@@ -63,7 +63,7 @@ def is_pooled(url: URL) -> bool:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(REPO_ROOT / ".env", REPO_ROOT / "backend" / ".env"),
+        env_file=REPO_ROOT / ".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",  # compose-only vars (POSTGRES_*, *_PORT) live in the same file

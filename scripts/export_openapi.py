@@ -6,7 +6,7 @@ a person. Hand-written frontend types are the same class of bug the backend's
 `tests/test_rbac_seed.py` exists to catch — two declarations of one truth,
 drifting apart quietly until something breaks in production.
 
-    python scripts/export_openapi.py --output ../frontend/openapi.json
+    python scripts/export_openapi.py --output ../hospital-frontend/openapi.json
 
 No server is started and no database is touched: FastAPI can produce the
 schema from the app object alone. That matters because it means the frontend's
@@ -42,7 +42,8 @@ def export(output: Path) -> int:
     rendered = json.dumps(schema, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(rendered, encoding="utf-8")
+    # LF on every OS: the frontend compares this byte-for-byte (codegen:check).
+    output.write_text(rendered, encoding="utf-8", newline="\n")
 
     print(
         f"Wrote {output} — {len(schema['paths'])} paths, "
@@ -56,8 +57,8 @@ def main() -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path(__file__).resolve().parents[2] / "frontend" / "openapi.json",
-        help="Where to write the schema (default: frontend/openapi.json).",
+        default=Path(__file__).resolve().parents[2] / "hospital-frontend" / "openapi.json",
+        help="Where to write the schema (default: ../hospital-frontend/openapi.json).",
     )
     args = parser.parse_args()
     return export(args.output)

@@ -1,0 +1,133 @@
+# Local development stack for hospital-backend.
+#
+# `docker compose up -d` starts Postgres and Redis only, for running the api
+# (uvicorn) and worker (arq) on the host. `docker compose --profile app up -d
+# --build` also runs the api and worker here, with --reload on bind-mounted
+# source. The frontend (hospital-frontend) and website (hospital-web) are
+# separate repos with their own dev servers; point the frontend's
+# API_BASE_URL at http://127.0.0.1:8000/api/v1.
+#
+# .env holds host-machine values (`localhost:5432`), which inside a container
+# point at the container itself. The app services therefore rebuild the
+# database URLs for the service network from the same .env's parts
+# (APP_DB_ROLE / APP_DB_PASSWORD for the app, POSTGRES_* for migrations).
+name: hospital-management
+
+x-container-db: &container-db
+  # Service-network overrides. .env holds host-machine values so the same
+  # file works for `uvicorn` run directly on the host.
+  DATABASE_URL: postgresql://${APP_DB_ROLE}:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-hospital}
+  DIRECT_URL: postgresql://${POSTGRES_USER:-hospital}:${POSTGRES_PASSWORD:-hospital}@postgres:5432/${POSTGRES_DB:-hospital}
+  REDIS_URL: redis://redis:6379/0
+
+services:
+  api:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      <<: *container-db
+      # --reload sees no file events on a Windows bind mount without polling.
+      WATCHFILES_FORCE_POLLING: "true"
+      PYTHONUTF8: "1"
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      # Source bind-mount + --reload: edits are live without a rebuild.
+      # PYTHONPATH=/code makes the mounted source win over the installed copy.
+      - .:/code
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    profiles: ["app"]
+    # Its own process, not a thread inside the api. A background job sharing
+    # the web process competes with request handling for the event loop, and
+    # the first thing that suffers is the latency of the screen a receptionist
+    # is staring at. It also lets the two scale independently.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      <<: *container-db
+    volumes:
+      - .:/code
+    command: ["arq", "app.workers.main.WorkerSettings"]
+    # ARQ serves no HTTP, so the image's `curl :8000/health` could never pass
+    # and the worker sat "unhealthy" for ever — on Render or Fly, a restart
+    # loop or a real failure hidden in the noise (OPS-01). `arq --check` reads
+    # the heartbeat the worker writes to Redis every minute.
+    healthcheck:
+      test: ["CMD", "arq", "--check", "app.workers.main.WorkerSettings"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hospital}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hospital}
+      POSTGRES_DB: ${POSTGRES_DB:-hospital}
+      # Deterministic collation — index ordering must not depend on the host.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # Postgres 18+ images expect the mount one level up, at
+      # /var/lib/postgresql, and place the cluster in a version-named
+      # subdirectory so `pg_upgrade --link` can work across a mount boundary.
+      # Mounting the old /var/lib/postgresql/data path makes the image refuse
+      # to start.
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hospital} -d ${POSTGRES_DB:-hospital}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    # appendonly keeps queued jobs across a restart — a dropped notification
+    # or auto-close job is a real workflow failure, not just a cache miss.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

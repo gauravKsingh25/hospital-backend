@@ -1,0 +1,56 @@
+# --- Secrets ---------------------------------------------------------------
+# Every .env variant. Only the documented template is committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# --- Local data ------------------------------------------------------------
+# DB dumps and local databases may hold patient data; never commit them.
+*.log
+pgdata/
+dump.rdb
+*.sqlite
+*.sqlite3
+*.dump
+*.sql.gz
+# Dev mail outbox (console mailer writes invite emails here)
+.mail-outbox/
+
+# --- Editors / OS / tooling ------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+.claude/settings.local.json
+.superpowers/
+.archify/

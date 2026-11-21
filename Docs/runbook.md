@@ -320,7 +320,7 @@ Check CORS with:
 Running the website e2e spec more than twice an hour from one machine uses up the
 signup rate limit for that address (10 starts an hour) and the page answers "Too many tries".
 In development, clear it with
-`docker exec hospital-management-redis-1 redis-cli --scan --pattern 'rl:signup-*' | xargs docker exec -i hospital-management-redis-1 redis-cli del`.
+`docker exec hospital-backend-redis-1 redis-cli --scan --pattern 'rl:signup-*' | xargs docker exec -i hospital-backend-redis-1 redis-cli del`.
 
 If the last step lands on the app's sign-in page with "link expired", the one-time
 handoff code (2 minutes) ran out: the account exists, so the person signs in with

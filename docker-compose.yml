@@ -11,7 +11,7 @@
 # point at the container itself. The app services therefore rebuild the
 # database URLs for the service network from the same .env's parts
 # (APP_DB_ROLE / APP_DB_PASSWORD for the app, POSTGRES_* for migrations).
-name: hospital-management
+name: hospital-backend
 
 x-container-db: &container-db
   # Service-network overrides. .env holds host-machine values so the same

@@ -82,8 +82,9 @@ gate unreachable for reasons no amount of frontend work can fix.
 
 ```bash
 cp .env.example .env      # fill in DATABASE_URL, DIRECT_URL and SECRET_KEY
+docker compose up -d postgres redis          # this repo's own Postgres and Redis
 
-cd backend
+python -m venv .venv && .venv/Scripts/pip install -e ".[dev]"   # bin/ instead of Scripts/ off Windows
 python scripts/bootstrap_db_role.py          # once per environment — see below
 alembic upgrade head                         # schema, RBAC seed, RLS policies
 python scripts/create_admin.py \
@@ -92,10 +93,16 @@ python scripts/create_admin.py \
 python scripts/seed_demo.py                  # a demo tenant, staffed and priced
 python scripts/seed_patient_history.py       # optional: three returning patients with history
 
-cd .. && docker compose --profile app up --build   # the containerised app; see docker-compose.yml
+uvicorn app.main:app --port 8000             # the API on the host…
+docker compose --profile app up --build      # …or the api and worker in containers
 ```
 
-- App: <http://localhost:3000>
+The Compose project is named `hospital-backend`, so its containers
+(`hospital-backend-postgres-1`, …) and data volumes are this repo's own. The
+staff app is [hospital-frontend](https://github.com/gauravKsingh25/hospital-frontend)
+and the website [hospital-web](https://github.com/gauravKsingh25/hospital-web);
+each runs and deploys separately and points at this API.
+
 - API: <http://localhost:8000>
 - Interactive docs: <http://localhost:8000/docs>
 - Health: `/health` (liveness), `/health/db`, `/health/redis`, `/health/ready`

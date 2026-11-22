@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
 
 # =============================================================================
-# Build stage — resolve and install dependencies into an isolated virtualenv.
+# Build stage - resolve and install dependencies into an isolated virtualenv.
 # Kept separate so the runtime image carries no compilers or build caches.
 # =============================================================================
-FROM python:3.13-slim AS builder
+FROM python:3.13-slim-bookworm AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -15,8 +15,6 @@ WORKDIR /build
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Dependency metadata first: this layer is cached until pyproject.toml changes,
-# so ordinary code edits rebuild in seconds.
 COPY pyproject.toml ./
 COPY app ./app
 RUN pip install --no-cache-dir .
@@ -25,7 +23,7 @@ RUN pip install --no-cache-dir .
 # =============================================================================
 # Runtime stage
 # =============================================================================
-FROM python:3.13-slim AS runtime
+FROM python:3.13-slim-bookworm AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
